@@ -1,0 +1,89 @@
+{
+    "ui_scaling": "100%",
+    "appearance_mode": "Dark",
+    "storage_method": "Credential Manager",
+    "tabs": [
+        {
+            "tab_name": "Tab 2",
+            "server": "TS-IT0",
+            "domain": "nd.lan",
+            "password_status": "",
+            "group_search": "",
+            "sessions": [],
+            "groups": [],
+            "printers": []
+        },
+        {
+            "tab_name": "Tab 3",
+            "server": "TS-IT0",
+            "domain": "nd.lan",
+            "password_status": "",
+            "group_search": "",
+            "sessions": [],
+            "groups": [],
+            "printers": []
+        },
+        {
+            "tab_name": "nd",
+            "server": "TS-IT0",
+            "domain": "nd.lan",
+            "password_status": "Suprun Dmitriy: Пароль не истекает",
+            "group_search": "suprund",
+            "sessions": [],
+            "groups": [
+                [
+                    "Тонкие клиенты - Элитный алкоголь (t-elit2)"
+                ],
+                [
+                    "RDP_s-1c8b"
+                ],
+                [
+                    "pr_it_Kyocera_2040_podmena"
+                ],
+                [
+                    "inet_google_docs"
+                ],
+                [
+                    "ИТ\\\\Отделы\\\\Отдел поддержки\\\\Внутренняя для отдела - полный"
+                ],
+                [
+                    "RDP_s-tk (для ОТП)"
+                ],
+                [
+                    "ИТ\\\\Общие документы\\\\Техн. документы\\\\Почта - чтение"
+                ],
+                [
+                    "inet_standart_teamviewer"
+                ],
+                [
+                    "vpn_it"
+                ],
+                [
+                    "Добавление к домену рабочих станций"
+                ],
+                [
+                    "ИТ\\\\Общие документы\\\\Админ. док\\\\Административные - чтение"
+                ],
+                [
+                    "admin_group"
+                ],
+                [
+                    "Radmin Group"
+                ],
+                [
+                    "ИТ\\\\Отделы\\\\Отдел поддержки - чтение"
+                ],
+                [
+                    "inet_standart_youtube"
+                ],
+                [
+                    "inet_it"
+                ],
+                [
+                    "Тонкие клиенты - ИТ"
+                ]
+            ],
+            "printers": []
+        }
+    ]
+}

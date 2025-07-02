@@ -1,0 +1,37 @@
+{
+    "ui_scaling": "100%",
+    "appearance_mode": "Light",
+    "storage_method": "Credential Manager",
+    "tabs": [
+        {
+            "tab_name": "Tab 1",
+            "server": "TS-IT0",
+            "domain": "nd.lan",
+            "password_status": "",
+            "group_search": "",
+            "sessions": [],
+            "groups": [],
+            "printers": []
+        },
+        {
+            "tab_name": "Tab 2",
+            "server": "TS-IT0",
+            "domain": "nd.lan",
+            "password_status": "",
+            "group_search": "",
+            "sessions": [],
+            "groups": [],
+            "printers": []
+        },
+        {
+            "tab_name": "1",
+            "server": "TS-IT0",
+            "domain": "nd.lan",
+            "password_status": "",
+            "group_search": "",
+            "sessions": [],
+            "groups": [],
+            "printers": []
+        }
+    ]
+}
