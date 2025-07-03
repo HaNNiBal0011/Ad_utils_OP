@@ -1,4 +1,4 @@
-# build.py
+# build_script.py
 """
 Скрипт для сборки RDP Manager в исполняемый файл Windows.
 Использует PyInstaller для создания standalone EXE.
@@ -7,8 +7,10 @@
 import os
 import sys
 import shutil
+import subprocess
 from pathlib import Path
 import PyInstaller.__main__
+import json
 
 def clean_build_dirs():
     """Очистка директорий от предыдущих сборок."""
@@ -16,13 +18,13 @@ def clean_build_dirs():
     for dir_name in dirs_to_clean:
         if os.path.exists(dir_name):
             shutil.rmtree(dir_name)
-            print(f"Очищена директория: {dir_name}")
+            print(f"✅ Очищена директория: {dir_name}")
     
     # Удаление .spec файла
     spec_file = 'RDPManager.spec'
     if os.path.exists(spec_file):
         os.remove(spec_file)
-        print(f"Удален файл: {spec_file}")
+        print(f"✅ Удален файл: {spec_file}")
 
 def check_requirements():
     """Проверка наличия необходимых файлов."""
@@ -30,6 +32,7 @@ def check_requirements():
         'main.py',
         'app.py',
         'config.json',
+        'users.json',
         'gui/navigation.py',
         'gui/home_frame.py',
         'gui/settings_frame.py',
@@ -37,7 +40,8 @@ def check_requirements():
         'utils/ad_utils.py',
         'utils/printer_utils.py',
         'utils/config.py',
-        'utils/password_manager.py'
+        'utils/password_manager.py',
+        'test_images/printers.json'
     ]
     
     missing_files = []
@@ -52,6 +56,36 @@ def check_requirements():
         return False
     
     print("✅ Все необходимые файлы найдены")
+    return True
+
+def check_dependencies():
+    """Проверка установленных зависимостей."""
+    required_packages = [
+        'customtkinter',
+        'pyinstaller',
+        'requests',
+        'cryptography',
+        'pywin32',
+        'ldap3',
+        'pillow'
+    ]
+    
+    missing_packages = []
+    for package in required_packages:
+        try:
+            __import__(package)
+        except ImportError:
+            missing_packages.append(package)
+    
+    if missing_packages:
+        print("❌ Отсутствуют необходимые пакеты:")
+        for package in missing_packages:
+            print(f"   - {package}")
+        print("\nУстановите их командой:")
+        print(f"pip install {' '.join(missing_packages)}")
+        return False
+    
+    print("✅ Все необходимые пакеты установлены")
     return True
 
 def create_version_file():
@@ -93,6 +127,24 @@ VSVersionInfo(
     print("✅ Создан файл версии")
     return 'version.txt'
 
+def validate_config_files():
+    """Проверка корректности JSON файлов."""
+    json_files = ['config.json', 'users.json', 'test_images/printers.json']
+    
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                json.load(f)
+            print(f"✅ {json_file} - корректный JSON")
+        except json.JSONDecodeError as e:
+            print(f"❌ {json_file} - ошибка JSON: {e}")
+            return False
+        except FileNotFoundError:
+            print(f"❌ {json_file} - файл не найден")
+            return False
+    
+    return True
+
 def build_exe():
     """Сборка исполняемого файла."""
     print("\n🔨 Начинаем сборку RDP Manager...\n")
@@ -100,9 +152,19 @@ def build_exe():
     # Очистка старых файлов
     clean_build_dirs()
     
+    # Проверка зависимостей
+    if not check_dependencies():
+        print("\n❌ Сборка прервана из-за отсутствующих зависимостей")
+        return False
+    
     # Проверка файлов
     if not check_requirements():
         print("\n❌ Сборка прервана из-за отсутствующих файлов")
+        return False
+    
+    # Проверка JSON файлов
+    if not validate_config_files():
+        print("\n❌ Сборка прервана из-за некорректных JSON файлов")
         return False
     
     # Создание файла версии
@@ -116,6 +178,7 @@ def build_exe():
         '--windowed',                        # Без консоли
         '--clean',                           # Очистка временных файлов
         '--noconfirm',                       # Без подтверждений
+        '--optimize=2',                      # Максимальная оптимизация
         
         # Иконка (если есть)
         '--icon=assets/icon.ico' if os.path.exists('assets/icon.ico') else '--icon=NONE',
@@ -123,29 +186,54 @@ def build_exe():
         # Версия
         f'--version-file={version_file}',
         
-        # Добавление данных
+        # Добавление данных - ФАЙЛЫ ВСТРОЕНЫ В EXE
         '--add-data=config.json;.',
+        '--add-data=users.json;.',
         '--add-data=test_images;test_images',
         
-        # Скрытые импорты
+        # Скрытые импорты для Windows
         '--hidden-import=win32timezone',
         '--hidden-import=win32api',
+        '--hidden-import=win32cred',
+        '--hidden-import=win32com.client',
+        '--hidden-import=pywintypes',
+        '--hidden-import=pythoncom',
+        
+        # Скрытые импорты для GUI
         '--hidden-import=PIL._tkinter_finder',
         '--hidden-import=pkg_resources.py2_warn',
+        '--hidden-import=tkinter.filedialog',
+        '--hidden-import=tkinter.messagebox',
+        
+        # Скрытые импорты для сетевых библиотек
+        '--hidden-import=ldap3',
+        '--hidden-import=requests',
+        '--hidden-import=urllib3',
         
         # Сбор всех данных из пакетов
         '--collect-all=customtkinter',
-        '--collect-all=pyad',
+        '--collect-all=PIL',
         
-        # Исключения (уменьшение размера)
+        # Исключения для уменьшения размера
         '--exclude-module=matplotlib',
         '--exclude-module=numpy',
         '--exclude-module=pandas',
         '--exclude-module=scipy',
-        '--exclude-module=tkinter.test',
+        '--exclude-module=tensorflow',
+        '--exclude-module=torch',
+        '--exclude-module=jupyter',
+        '--exclude-module=notebook',
+        '--exclude-module=IPython',
+        '--exclude-module=zmq',
+        '--exclude-module=test',
+        '--exclude-module=unittest',
+        '--exclude-module=pydoc',
+        '--exclude-module=doctest',
         
-        # Оптимизация
-        '--optimize=2',
+        # Дополнительные пути
+        '--paths=.',
+        '--paths=gui',
+        '--paths=utils',
     ]
     
     # Добавляем папку assets если она существует
@@ -157,7 +245,7 @@ def build_exe():
         if arg.startswith('--'):
             print(f"   {arg}")
     
-    print("\n⏳ Это может занять несколько минут...\n")
+    print("\n⏳ Сборка может занять несколько минут...\n")
     
     try:
         # Запуск PyInstaller
@@ -175,6 +263,17 @@ def build_exe():
             if os.path.exists(version_file):
                 os.remove(version_file)
             
+            # Проверка запуска (опционально)
+            print(f"\n🧪 Хотите протестировать запуск? (y/n): ", end="")
+            test_response = input().lower()
+            if test_response == 'y':
+                print("🚀 Запуск тестирования...")
+                try:
+                    subprocess.Popen([str(exe_path)], cwd=exe_path.parent)
+                    print("✅ Приложение запущено для тестирования")
+                except Exception as e:
+                    print(f"❌ Ошибка запуска: {e}")
+            
             return True
         else:
             print("\n❌ Ошибка: исполняемый файл не создан")
@@ -186,30 +285,36 @@ def build_exe():
 
 def create_installer_script():
     """Создание скрипта для Inno Setup (опционально)."""
-    inno_script = """
+    inno_script = f"""
 [Setup]
 AppName=RDP Manager
 AppVersion=1.0.0
 AppPublisher=IT Department
 AppPublisherURL=http://internal.company.com
-DefaultDirName={autopf}\RDPManager
+DefaultDirName={{autopf}}\\RDPManager
 DefaultGroupName=RDP Manager
-UninstallDisplayIcon={app}\RDPManager.exe
-Compression=lzma2
+UninstallDisplayIcon={{app}}\\RDPManager.exe
+Compression=lzma2/ultra64
 SolidCompression=yes
 OutputDir=installer
-OutputBaseFilename=RDPManager_Setup
+OutputBaseFilename=RDPManager_Setup_v1.0.0
+SetupIconFile=assets\\icon.ico
+WizardImageFile=assets\\installer_banner.bmp
+WizardSmallImageFile=assets\\installer_icon.bmp
 
 [Files]
-Source: "dist\RDPManager.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\\RDPManager.exe"; DestDir: "{{app}}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\RDP Manager"; Filename: "{app}\RDPManager.exe"
-Name: "{group}\Удалить RDP Manager"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\RDP Manager"; Filename: "{app}\RDPManager.exe"
+Name: "{{group}}\\RDP Manager"; Filename: "{{app}}\\RDPManager.exe"; WorkingDir: "{{app}}"
+Name: "{{group}}\\Удалить RDP Manager"; Filename: "{{uninstallexe}}"
+Name: "{{autodesktop}}\\RDP Manager"; Filename: "{{app}}\\RDPManager.exe"; WorkingDir: "{{app}}"
 
 [Run]
-Filename: "{app}\RDPManager.exe"; Description: "Запустить RDP Manager"; Flags: nowait postinstall skipifsilent
+Filename: "{{app}}\\RDPManager.exe"; Description: "Запустить RDP Manager"; Flags: nowait postinstall skipifsilent
+
+[Registry]
+Root: HKCU; Subkey: "Software\\RDPManager"; ValueType: string; ValueName: "InstallPath"; ValueData: "{{app}}"
 """
     
     with open('installer.iss', 'w', encoding='utf-8') as f:
@@ -218,10 +323,35 @@ Filename: "{app}\RDPManager.exe"; Description: "Запустить RDP Manager";
     print("\n📝 Создан скрипт для Inno Setup: installer.iss")
     print("   Используйте Inno Setup Compiler для создания установщика")
 
+def show_final_info():
+    """Показать финальную информацию."""
+    print("\n" + "=" * 60)
+    print("🎉 СБОРКА RDP MANAGER ЗАВЕРШЕНА!")
+    print("=" * 60)
+    
+    exe_path = Path('dist/RDPManager.exe')
+    if exe_path.exists():
+        print(f"\n📍 Расположение: {exe_path.absolute()}")
+        print(f"📊 Размер: {exe_path.stat().st_size / (1024 * 1024):.2f} МБ")
+        
+        print(f"\n📋 Встроенные файлы:")
+        print(f"   ✅ config.json")
+        print(f"   ✅ users.json")
+        print(f"   ✅ test_images/printers.json")
+        print(f"   ✅ GUI модули")
+        print(f"   ✅ Utils модули")
+        
+        print(f"\n🚀 Готово к развертыванию!")
+        print(f"   • Просто скопируйте RDPManager.exe на целевые машины")
+        print(f"   • Все конфигурации встроены в исполняемый файл")
+        print(f"   • Дополнительные файлы не требуются")
+    
+    print("\n" + "=" * 60)
+
 if __name__ == "__main__":
-    print("=" * 50)
-    print("RDP Manager - Сборка исполняемого файла")
-    print("=" * 50)
+    print("=" * 60)
+    print("🔨 RDP MANAGER - СКРИПТ СБОРКИ")
+    print("=" * 60)
     
     # Проверка наличия PyInstaller
     try:
@@ -234,16 +364,21 @@ if __name__ == "__main__":
     
     # Выполнение сборки
     if build_exe():
-        print("\n" + "=" * 50)
-        print("🎉 Готово! Вы можете найти RDPManager.exe в папке 'dist'")
-        print("=" * 50)
+        show_final_info()
         
         # Предложение создать установщик
-        response = input("\nСоздать скрипт для установщика? (y/n): ").lower()
+        print(f"\nСоздать скрипт для установщика? (y/n): ", end="")
+        response = input().lower()
         if response == 'y':
             create_installer_script()
+            
     else:
-        print("\n" + "=" * 50)
-        print("❌ Сборка завершилась с ошибками")
-        print("=" * 50)
+        print("\n" + "=" * 60)
+        print("❌ СБОРКА ЗАВЕРШИЛАСЬ С ОШИБКАМИ")
+        print("=" * 60)
+        print("\n🔍 Проверьте:")
+        print("   • Все файлы проекта на месте")
+        print("   • Установлены все зависимости")
+        print("   • JSON файлы корректны")
+        print("   • Нет синтаксических ошибок в коде")
         sys.exit(1)
