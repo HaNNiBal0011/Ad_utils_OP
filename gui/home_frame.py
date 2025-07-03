@@ -28,7 +28,10 @@ class TabHomeFrame(ctk.CTkFrame):
         # Очередь для асинхронных операций
         self.async_queue = queue.Queue()
         
-        # Настройка сетки
+        # Флаг для отслеживания инициализации
+        self._initialization_complete = False
+        
+        # ИСПРАВЛЕНИЕ: Простая настройка сетки с правильными пропорциями
         self._setup_grid()
         
         # Создание UI элементов
@@ -47,30 +50,56 @@ class TabHomeFrame(ctk.CTkFrame):
         # Запуск обработчика очереди
         self._process_queue()
         
-        # Автоматическая подстройка размеров колонок после отрисовки
-        self.after(100, self._adjust_columns_width)
-        
-        # ИСПРАВЛЕНИЕ: Принудительное обновление отображения
-        self.after(10, self._force_update_display)
-    
-    def _force_update_display(self):
-        """Принудительное обновление отображения интерфейса."""
-        try:
-            self.update_idletasks()
-            # Обновляем все дочерние элементы
-            for child in self.winfo_children():
-                child.update_idletasks()
-            # Перерисовываем фрейм
-            self.update()
-        except Exception as e:
-            logger.debug(f"Ошибка принудительного обновления: {e}")
+        # Отложенная инициализация
+        self.after(200, self._delayed_init)
     
     def _setup_grid(self):
-        """Настройка сетки фрейма."""
-        self.grid_columnconfigure((0, 3, 4), weight=1)
-        self.grid_columnconfigure((1, 2), weight=0)
+        """Простая настройка сетки с правильными пропорциями."""
+        # Настройка строк
         self.grid_rowconfigure((0, 1, 2, 3), weight=0)
         self.grid_rowconfigure(4, weight=1)
+        
+        # ИСПРАВЛЕНИЕ: Простая настройка колонок с правильными пропорциями
+        self.grid_columnconfigure(0, weight=25)  # Сессии - 25%
+        self.grid_columnconfigure(1, weight=40)  # Группы - 40%
+        self.grid_columnconfigure(2, weight=35)  # Принтеры - 35%
+    
+    def _delayed_init(self):
+        """Отложенная инициализация."""
+        def stage1():
+            self.update_idletasks()
+            self.after(100, stage2)
+        
+        def stage2():
+            self.update_idletasks()
+            self._adjust_all_columns()
+            self.after(100, stage3)
+        
+        def stage3():
+            self.update_idletasks()
+            self._adjust_all_columns()
+            self._initialization_complete = True
+            logger.debug("Инициализация TabHomeFrame завершена")
+        
+        stage1()
+    
+    def _adjust_all_columns(self):
+        """Подстройка всех колонок."""
+        try:
+            # Подстройка колонок сессий
+            if hasattr(self, 'session_frame') and self.session_frame.winfo_width() > 1:
+                self._adjust_session_columns()
+            
+            # Подстройка колонок групп
+            if hasattr(self, 'group_frame') and self.group_frame.winfo_width() > 1:
+                self._adjust_group_columns()
+            
+            # Подстройка колонок принтеров
+            if hasattr(self, 'printer_manager') and hasattr(self.printer_manager, 'printer_frame'):
+                if self.printer_manager.printer_frame.winfo_width() > 1:
+                    self._adjust_printer_columns()
+        except Exception as e:
+            logger.debug(f"Ошибка подстройки колонок: {e}")
     
     def _create_widgets(self):
         """Создание всех виджетов."""
@@ -86,7 +115,7 @@ class TabHomeFrame(ctk.CTkFrame):
         """Создание элементов управления сессиями."""
         # Фрейм для сервера и кнопки обновления
         server_frame = ctk.CTkFrame(self, fg_color="transparent")
-        server_frame.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="w")
+        server_frame.grid(row=0, column=0, padx=2, pady=2, sticky="ew")
         
         # Поле ввода сервера
         self.server_entry = ctk.CTkEntry(
@@ -110,7 +139,8 @@ class TabHomeFrame(ctk.CTkFrame):
         self.loading_label = ctk.CTkLabel(
             server_frame,
             text="",
-            text_color=("gray50", "gray70")
+            text_color=("gray50", "gray70"),
+            font=ctk.CTkFont(size=11)
         )
         self.loading_label.pack(side="left", padx=(10, 0))
         
@@ -121,16 +151,15 @@ class TabHomeFrame(ctk.CTkFrame):
             width=150
         )
         self.combobox_domain.set(self.config_data.get("domain", "nd.lan"))
-        self.combobox_domain.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.combobox_domain.grid(row=1, column=0, padx=2, pady=2, sticky="ew")
         
         # Статус пароля
         self.password_status_entry = ctk.CTkEntry(
             self, 
-            width=300, 
             placeholder_text="Статус пароля",
             state="readonly"
         )
-        self.password_status_entry.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="w")
+        self.password_status_entry.grid(row=2, column=0, padx=2, pady=2, sticky="ew")
         
         # Установка значения после создания виджета
         status = self.config_data.get("password_status", "")
@@ -143,7 +172,7 @@ class TabHomeFrame(ctk.CTkFrame):
         """Создание таблицы сессий."""
         # Фрейм для Treeview
         self.session_frame = ctk.CTkFrame(self)
-        self.session_frame.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+        self.session_frame.grid(row=4, column=0, padx=2, pady=2, sticky="nsew")
         self.session_frame.grid_rowconfigure(0, weight=1)
         self.session_frame.grid_columnconfigure(0, weight=1)
         
@@ -153,36 +182,29 @@ class TabHomeFrame(ctk.CTkFrame):
             self.session_frame, 
             columns=columns,
             show="headings", 
-            height=10
+            height=15
         )
         
+        # Настройка заголовков
+        self.tree.heading("SessionName", text="Имя сессии")
+        self.tree.heading("Username", text="Пользователь")
+        self.tree.heading("SessionID", text="ID сессии")
+        self.tree.heading("Status", text="Статус")
+        
         # Настройка колонок
-        column_config = {
-            "SessionName": ("Имя сессии", 0.25),    # 25% ширины
-            "Username": ("Пользователь", 0.35),     # 35% ширины
-            "SessionID": ("ID сессии", 0.15),       # 15% ширины
-            "Status": ("Статус", 0.25)              # 25% ширины
-        }
-        
-        # Сохраняем конфигурацию для последующего использования
-        self.session_column_config = column_config
-        
-        for col, (heading, _) in column_config.items():
-            self.tree.heading(col, text=heading)
-            # Временная ширина, будет обновлена после отрисовки
+        for col in columns:
             self.tree.column(col, width=100, stretch=True)
-        
         
         self.tree.grid(row=0, column=0, sticky="nsew")
         
-        # Привязка события изменения размера
+        # Привязка событий
         self.session_frame.bind("<Configure>", self._on_session_frame_resize)
     
     def _create_group_controls(self):
         """Создание элементов управления группами."""
         # Фрейм для поиска групп
         group_frame = ctk.CTkFrame(self, fg_color="transparent")
-        group_frame.grid(row=2, column=3, padx=5, pady=5, sticky="w")
+        group_frame.grid(row=2, column=1, padx=2, pady=2, sticky="ew")
         
         # Поле поиска
         self.group_search_entry = ctk.CTkEntry(
@@ -206,7 +228,7 @@ class TabHomeFrame(ctk.CTkFrame):
         """Создание таблицы групп."""
         # Фрейм для Treeview
         self.group_frame = ctk.CTkFrame(self)
-        self.group_frame.grid(row=4, column=3, padx=5, pady=5, sticky="nsew")
+        self.group_frame.grid(row=4, column=1, padx=2, pady=2, sticky="nsew")
         self.group_frame.grid_rowconfigure(0, weight=1)
         self.group_frame.grid_columnconfigure(0, weight=1)
         
@@ -215,24 +237,22 @@ class TabHomeFrame(ctk.CTkFrame):
             self.group_frame, 
             columns=("GroupName",), 
             show="headings", 
-            height=10
+            height=15
         )
         
         # Настройка колонок
         self.group_tree.heading("GroupName", text="Группа")
-        # Временная ширина, будет обновлена после отрисовки
-        self.group_tree.column("GroupName", width=300, stretch=True)
-        
+        self.group_tree.column("GroupName", width=400, stretch=True)
         
         self.group_tree.grid(row=0, column=0, sticky="nsew")
         
         # Загрузка сохраненных групп
         if self.load_from_config and "groups" in self.config_data:
             for group in self.config_data.get("groups", []):
-                if group:  # Проверяем, что группа не пустая
+                if group:
                     self.group_tree.insert("", "end", values=group)
         
-        # Привязка события изменения размера
+        # Привязка событий
         self.group_frame.bind("<Configure>", self._on_group_frame_resize)
     
     def _create_printer_section(self):
@@ -240,26 +260,24 @@ class TabHomeFrame(ctk.CTkFrame):
         self.printer_manager = PrinterManager(self)
         self.printer_manager.setup_ui(
             row=2, 
-            column=4, 
+            column=2, 
             tree_row=4,
+            tree_height=15,
             tree_columns=self.config_data.get("printer_tree_columns", {})
         )
-        
-        # Принтеры загружаются автоматически из файла printers.json
-        # и фильтруются по серверу в PrinterManager
     
     def _create_tab_controls(self):
         """Создание элементов управления вкладками."""
         # Фрейм для кнопок вкладок
         self.tab_buttons_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.tab_buttons_frame.grid(row=0, column=4, padx=5, pady=5, sticky="ne")
+        self.tab_buttons_frame.grid(row=0, column=2, padx=2, pady=2, sticky="ne")
         
         # Кнопка добавления вкладки
         self.add_tab_button = ctk.CTkButton(
             self.tab_buttons_frame, 
             text="➕ Новая вкладка", 
             command=self.add_new_tab,
-            width=120
+            width=165
         )
         self.add_tab_button.pack(side="left", padx=(0, 5))
         
@@ -279,10 +297,10 @@ class TabHomeFrame(ctk.CTkFrame):
             self, 
             text="✏️ Переименовать", 
             command=self.rename_tab, 
-            width=175, 
+            width=200, 
             height=30
         )
-        self.rename_tab_button.grid(row=1, column=4, padx=5, pady=5, sticky="ne")
+        self.rename_tab_button.grid(row=1, column=2, padx=2, pady=2, sticky="ne")
     
     def _create_context_menu(self):
         """Создание контекстного меню."""
@@ -317,7 +335,30 @@ class TabHomeFrame(ctk.CTkFrame):
         # Контекстное меню
         self.tree.bind("<Button-3>", self.show_context_menu)
         self.group_tree.bind("<Button-3>", self.show_context_menu)
-        self.printer_manager.tree.bind("<Button-3>", self.show_context_menu)
+        
+        # ИСПРАВЛЕНИЕ: Простая обработка изменения размеров
+        self.bind("<Configure>", self._on_resize)
+        
+        # Привязка событий для принтеров
+        self.after(200, self._bind_printer_events)
+    
+    def _bind_printer_events(self):
+        """Привязка событий для принтеров."""
+        try:
+            if hasattr(self.printer_manager, 'tree'):
+                self.printer_manager.tree.bind("<Button-3>", self.show_context_menu)
+        except Exception as e:
+            logger.debug(f"Ошибка привязки событий принтеров: {e}")
+    
+    def _on_resize(self, event):
+        """Простая обработка изменения размеров."""
+        if event.widget != self or not self._initialization_complete:
+            return
+        
+        # Откладываем обновление
+        if hasattr(self, '_resize_job'):
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(200, self._adjust_all_columns)
     
     def _process_queue(self):
         """Обработка асинхронной очереди."""
@@ -341,7 +382,7 @@ class TabHomeFrame(ctk.CTkFrame):
         self.refresh_button.configure(state="normal")
     
     def refresh_sessions(self):
-        """Обновление списка RDP сессий в отдельном потоке."""
+        """Обновление списка RDP сессий."""
         server = self.server_entry.get().strip()
         if not server:
             self.app.show_warning("Предупреждение", "Введите имя сервера")
@@ -351,7 +392,6 @@ class TabHomeFrame(ctk.CTkFrame):
         
         def worker():
             try:
-                # Выполняем команду qwinsta
                 result = subprocess.run(
                     f"qwinsta /server:{server}",
                     shell=True,
@@ -367,10 +407,7 @@ class TabHomeFrame(ctk.CTkFrame):
                     )
                     return
                 
-                # Парсинг результатов
                 sessions = self._parse_qwinsta_output(result.stdout)
-                
-                # Обновление UI в главном потоке
                 self.async_queue.put(
                     lambda: self._update_session_tree(sessions)
                 )
@@ -384,7 +421,6 @@ class TabHomeFrame(ctk.CTkFrame):
                     lambda: self._handle_session_error(server, str(e))
                 )
         
-        # Запуск в отдельном потоке
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
     
@@ -396,12 +432,10 @@ class TabHomeFrame(ctk.CTkFrame):
         if len(lines) < 2:
             return sessions
         
-        # Пропускаем заголовок
         for line in lines[1:]:
             if not line.strip():
                 continue
             
-            # Разбор строки с учетом возможных пробелов
             parts = line.split()
             if len(parts) >= 4:
                 session_name = parts[0]
@@ -417,7 +451,6 @@ class TabHomeFrame(ctk.CTkFrame):
         """Обновление таблицы сессий."""
         self.hide_loading()
         
-        # Очистка таблицы
         self.tree.delete(*self.tree.get_children())
         
         if not sessions:
@@ -427,9 +460,11 @@ class TabHomeFrame(ctk.CTkFrame):
             )
             return
         
-        # Добавление сессий
         for session in sessions:
             self.tree.insert("", "end", values=session)
+        
+        if self._initialization_complete:
+            self.after(50, self._adjust_session_columns)
         
         logger.info(f"Загружено {len(sessions)} сессий")
     
@@ -448,13 +483,8 @@ class TabHomeFrame(ctk.CTkFrame):
             self.app.show_warning("Предупреждение", "Введите логин пользователя")
             return
         
-        # Поиск групп
         search_groups(self, self.app)
-        
-        # Проверка пароля
         check_password_ldap_with_auth(self, self.app)
-        
-        # Автоопределение сервера
         self.set_user_server_from_groups()
     
     def set_user_server_from_groups(self):
@@ -493,7 +523,6 @@ class TabHomeFrame(ctk.CTkFrame):
             session_id = self.tree.item(selected_item[0], "values")[2]
             server = self.server_entry.get()
             
-            # Запуск mstsc для shadow подключения
             cmd = f"mstsc /v:{server} /shadow:{session_id} /control"
             subprocess.Popen(cmd, shell=True)
             
@@ -505,30 +534,28 @@ class TabHomeFrame(ctk.CTkFrame):
     
     def show_context_menu(self, event):
         """Отображение контекстного меню."""
-        # Определяем, какое дерево активно
         tree = event.widget
-        
-        # Выбираем элемент под курсором
         item = tree.identify_row(event.y)
         if item:
             tree.selection_set(item)
         
-        # Настраиваем видимость пунктов меню
-        if tree == self.printer_manager.tree:
-            self.context_menu.entryconfig("Открыть веб-интерфейс", state="normal")
-            self.context_menu.entryconfig("Подключиться к сессии", state="disabled")
-        elif tree == self.tree:
-            self.context_menu.entryconfig("Открыть веб-интерфейс", state="disabled")
-            self.context_menu.entryconfig("Подключиться к сессии", state="normal")
-        else:
-            self.context_menu.entryconfig("Открыть веб-интерфейс", state="disabled")
-            self.context_menu.entryconfig("Подключиться к сессии", state="disabled")
+        try:
+            if tree == self.printer_manager.tree:
+                self.context_menu.entryconfig("Открыть веб-интерфейс", state="normal")
+                self.context_menu.entryconfig("Подключиться к сессии", state="disabled")
+            elif tree == self.tree:
+                self.context_menu.entryconfig("Открыть веб-интерфейс", state="disabled")
+                self.context_menu.entryconfig("Подключиться к сессии", state="normal")
+            else:
+                self.context_menu.entryconfig("Открыть веб-интерфейс", state="disabled")
+                self.context_menu.entryconfig("Подключиться к сессии", state="disabled")
+        except:
+            pass
         
-        # Показываем меню
         self.context_menu.post(event.x_root, event.y_root)
     
     def copy_selected_item(self):
-        """Копирование выбранного элемента в буфер обмена."""
+        """Копирование выбранного элемента."""
         tree = self.get_focused_treeview()
         if not tree:
             return
@@ -538,12 +565,10 @@ class TabHomeFrame(ctk.CTkFrame):
             return
         
         try:
-            # Определяем колонку под курсором
             x = tree.winfo_pointerx() - tree.winfo_rootx()
             column_id = tree.identify_column(x)
             column_index = int(column_id.replace('#', '')) - 1
             
-            # Получаем значение
             item_values = tree.item(selected_item[0], "values")
             if item_values and 0 <= column_index < len(item_values):
                 value = str(item_values[column_index])
@@ -556,7 +581,7 @@ class TabHomeFrame(ctk.CTkFrame):
             logger.error(f"Ошибка копирования: {e}")
     
     def copy_entire_row(self):
-        """Копирование всей строки в буфер обмена."""
+        """Копирование всей строки."""
         tree = self.get_focused_treeview()
         if not tree:
             return
@@ -579,14 +604,14 @@ class TabHomeFrame(ctk.CTkFrame):
     
     def open_printer_web_interface(self):
         """Открытие веб-интерфейса принтера."""
-        if self.get_focused_treeview() != self.printer_manager.tree:
-            return
-        
-        selected_item = self.printer_manager.tree.selection()
-        if not selected_item:
-            return
-        
         try:
+            if self.get_focused_treeview() != self.printer_manager.tree:
+                return
+            
+            selected_item = self.printer_manager.tree.selection()
+            if not selected_item:
+                return
+            
             item_values = self.printer_manager.tree.item(selected_item[0], "values")
             if item_values and len(item_values) > 1:
                 ip_address = item_values[1]
@@ -599,8 +624,11 @@ class TabHomeFrame(ctk.CTkFrame):
     def get_focused_treeview(self):
         """Получение активного Treeview."""
         focused = self.focus_get()
-        if focused in [self.tree, self.group_tree, self.printer_manager.tree]:
-            return focused
+        try:
+            if focused in [self.tree, self.group_tree, self.printer_manager.tree]:
+                return focused
+        except:
+            pass
         return None
     
     def add_new_tab(self):
@@ -633,7 +661,6 @@ class TabHomeFrame(ctk.CTkFrame):
         """Переименование текущей вкладки."""
         current_tab = self.app.home_frame.tabview.get()
         
-        # Диалог ввода нового имени
         dialog = ctk.CTkInputDialog(
             text=f"Введите новое имя для вкладки '{current_tab}':", 
             title="Переименовать вкладку"
@@ -643,14 +670,11 @@ class TabHomeFrame(ctk.CTkFrame):
         if not new_name:
             return
         
-        # Проверка уникальности имени
         if new_name in self.app.home_frame.tabview._tab_dict:
             self.app.show_error("Ошибка", "Вкладка с таким именем уже существует!")
             return
         
-        # Создание новой вкладки с новым именем
         self.app.home_frame.rename_tab(current_tab, new_name)
-        
         logger.info(f"Вкладка переименована: '{current_tab}' -> '{new_name}'")
     
     def update_treeview_style(self, appearance_mode: str):
@@ -690,53 +714,39 @@ class TabHomeFrame(ctk.CTkFrame):
             foreground=[('selected', fg_color)]
         )
         
-        # Применение стиля к таблицам
-        for tree in [self.tree, self.group_tree, self.printer_manager.tree]:
-            tree.configure(style="Treeview")
+        try:
+            for tree in [self.tree, self.group_tree, self.printer_manager.tree]:
+                tree.configure(style="Treeview")
+        except:
+            pass
     
     def get_treeview_column_widths(self, tree) -> Dict[str, int]:
         """Получение ширины колонок таблицы."""
-        return {col: tree.column(col, "width") for col in tree["columns"]}
+        try:
+            return {col: tree.column(col, "width") for col in tree["columns"]}
+        except:
+            return {}
     
     def cleanup(self):
         """Очистка ресурсов."""
-        # Здесь можно добавить очистку ресурсов если необходимо
-        pass
-    
-    def _adjust_columns_width(self):
-        """Автоматическая подстройка ширины колонок под размер окна."""
-        # Ждем полной отрисовки окна
-        self.update_idletasks()
-        
-        # Подстройка колонок сессий
-        if hasattr(self, 'session_frame') and self.session_frame.winfo_width() > 1:
-            self._adjust_session_columns()
-        
-        # Подстройка колонок групп
-        if hasattr(self, 'group_frame') and self.group_frame.winfo_width() > 1:
-            self._adjust_group_columns()
-        
-        # Подстройка колонок принтеров
-        if hasattr(self, 'printer_manager') and hasattr(self.printer_manager, 'printer_frame'):
-            if self.printer_manager.printer_frame.winfo_width() > 1:
-                self._adjust_printer_columns()
+        try:
+            if hasattr(self, 'printer_manager'):
+                self.printer_manager.cleanup()
+        except:
+            pass
     
     def _adjust_session_columns(self):
         """Подстройка ширины колонок таблицы сессий."""
         try:
-            # Получаем доступную ширину (минус скроллбар)
             available_width = self.session_frame.winfo_width() - 20
             
-            if available_width > 100:  # Минимальная разумная ширина
-                # Проверяем сохраненные размеры
+            if available_width > 200:
                 saved_columns = self.config_data.get("session_tree_columns", {})
                 
                 if saved_columns and all(col in saved_columns for col in self.tree["columns"]):
-                    # Используем сохраненные размеры
                     for col in self.tree["columns"]:
                         self.tree.column(col, width=saved_columns[col])
                 else:
-                    # Используем процентное распределение
                     widths = {
                         "SessionName": int(available_width * 0.25),
                         "Username": int(available_width * 0.35),
@@ -752,17 +762,14 @@ class TabHomeFrame(ctk.CTkFrame):
     def _adjust_group_columns(self):
         """Подстройка ширины колонок таблицы групп."""
         try:
-            # Получаем доступную ширину (минус скроллбар)
             available_width = self.group_frame.winfo_width() - 20
             
-            if available_width > 100:  # Минимальная разумная ширина
-                # Проверяем сохраненные размеры
+            if available_width > 200:
                 saved_columns = self.config_data.get("group_tree_columns", {})
                 
                 if saved_columns and "GroupName" in saved_columns:
                     self.group_tree.column("GroupName", width=saved_columns["GroupName"])
                 else:
-                    # Используем всю доступную ширину
                     self.group_tree.column("GroupName", width=available_width)
         except Exception as e:
             logger.debug(f"Ошибка подстройки колонок групп: {e}")
@@ -770,19 +777,15 @@ class TabHomeFrame(ctk.CTkFrame):
     def _adjust_printer_columns(self):
         """Подстройка ширины колонок таблицы принтеров."""
         try:
-            # Получаем доступную ширину (минус скроллбар)
             available_width = self.printer_manager.printer_frame.winfo_width() - 20
             
-            if available_width > 100:  # Минимальная разумная ширина
-                # Проверяем сохраненные размеры
+            if available_width > 200:
                 saved_columns = self.config_data.get("printer_tree_columns", {})
                 
                 if saved_columns and all(col in saved_columns for col in self.printer_manager.tree["columns"]):
-                    # Используем сохраненные размеры
                     for col in self.printer_manager.tree["columns"]:
                         self.printer_manager.tree.column(col, width=saved_columns[col])
                 else:
-                    # Используем процентное распределение для принтеров
                     widths = {
                         "Printer": int(available_width * 0.40),
                         "IP": int(available_width * 0.25),
@@ -798,17 +801,21 @@ class TabHomeFrame(ctk.CTkFrame):
     
     def _on_session_frame_resize(self, event):
         """Обработка изменения размера фрейма сессий."""
-        # Откладываем обработку для предотвращения множественных вызовов
+        if not self._initialization_complete:
+            return
+        
         if hasattr(self, '_resize_job'):
             self.after_cancel(self._resize_job)
-        self._resize_job = self.after(150, self._adjust_session_columns)
+        self._resize_job = self.after(100, self._adjust_session_columns)
     
     def _on_group_frame_resize(self, event):
         """Обработка изменения размера фрейма групп."""
-        # Откладываем обработку для предотвращения множественных вызовов
+        if not self._initialization_complete:
+            return
+        
         if hasattr(self, '_group_resize_job'):
             self.after_cancel(self._group_resize_job)
-        self._group_resize_job = self.after(150, self._adjust_group_columns)
+        self._group_resize_job = self.after(100, self._adjust_group_columns)
 
 
 class HomeFrame(ctk.CTkFrame):
@@ -820,52 +827,40 @@ class HomeFrame(ctk.CTkFrame):
         self.app = app
         self.load_from_config = load_from_config
         
-        # Настройка сетки
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
         
-        # Создание TabView
         self.tabview = ctk.CTkTabview(self)
         self.tabview.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
         
-        # Создание начальных вкладок
         if not self.load_from_config:
             self.initial_tab_names = ["Сервер 1", "Сервер 2", "Сервер 3"]
             for tab_name in self.initial_tab_names:
                 self._create_tab(tab_name)
             
-            # ИСПРАВЛЕНИЕ: Устанавливаем первую вкладку как активную
             if self.initial_tab_names:
                 self.tabview.set(self.initial_tab_names[0])
         
-        # Обновление стилей
         self.update_treeview_style(ctk.get_appearance_mode())
-        
-        # ИСПРАВЛЕНИЕ: Принудительное обновление отображения
-        self.after(50, self._force_display_update)
-        
-        # Автоматическая подстройка размеров колонок для всех вкладок после создания
-        self.after(200, self._adjust_all_tabs_columns)
+        self.after(300, self._delayed_home_init)
     
-    def _force_display_update(self):
-        """Принудительное обновление отображения всех вкладок."""
+    def _delayed_home_init(self):
+        """Отложенная инициализация HomeFrame."""
         try:
-            # Обновляем отображение TabView
-            self.tabview.update_idletasks()
+            self.update_idletasks()
             
-            # Обновляем все созданные вкладки
             for tab_name in list(self.tabview._tab_dict.keys()):
                 tab_frame = self.tabview.tab(tab_name)
                 if tab_frame.winfo_children():
                     frame = tab_frame.winfo_children()[0]
-                    if hasattr(frame, '_force_update_display'):
-                        frame._force_update_display()
+                    if hasattr(frame, 'update_idletasks'):
+                        frame.update_idletasks()
+                    if hasattr(frame, '_adjust_all_columns'):
+                        frame._adjust_all_columns()
             
-            # Обновляем главный фрейм
-            self.update_idletasks()
-            self.update()
+            logger.debug("Инициализация HomeFrame завершена")
         except Exception as e:
-            logger.debug(f"Ошибка принудительного обновления отображения: {e}")
+            logger.debug(f"Ошибка инициализации HomeFrame: {e}")
     
     def _create_tab(self, tab_name: str, config_data: Optional[Dict] = None) -> TabHomeFrame:
         """Создание новой вкладки."""
@@ -879,14 +874,10 @@ class HomeFrame(ctk.CTkFrame):
         )
         tab_frame.pack(fill="both", expand=True)
         
-        # Автоматическая подстройка размеров колонок после создания вкладки
-        tab_frame.after(100, tab_frame._adjust_columns_width)
-        
         return tab_frame
     
     def add_new_tab(self):
         """Добавление новой вкладки."""
-        # Генерация имени для новой вкладки
         existing_tabs = list(self.tabview._tab_dict.keys())
         new_tab_number = 1
         
@@ -895,7 +886,6 @@ class HomeFrame(ctk.CTkFrame):
         
         new_tab_name = f"Сервер {new_tab_number}"
         
-        # Создание вкладки
         self._create_tab(new_tab_name)
         self.tabview.set(new_tab_name)
         
@@ -903,11 +893,9 @@ class HomeFrame(ctk.CTkFrame):
     
     def rename_tab(self, old_name: str, new_name: str):
         """Переименование вкладки."""
-        # Получаем данные старой вкладки
         old_tab = self.tabview.tab(old_name)
         old_frame = old_tab.winfo_children()[0]
         
-        # Сохраняем состояние
         config_data = {
             "tab_name": new_name,
             "server": old_frame.server_entry.get(),
@@ -923,23 +911,22 @@ class HomeFrame(ctk.CTkFrame):
             "printer_tree_columns": old_frame.get_treeview_column_widths(old_frame.printer_manager.tree)
         }
         
-        # Создаем новую вкладку с новым именем
         new_frame = self._create_tab(new_name, config_data)
         
-        # Копируем данные таблиц
         for item in old_frame.tree.get_children():
             values = old_frame.tree.item(item, "values")
             new_frame.tree.insert("", "end", values=values)
         
-        for item in old_frame.printer_manager.tree.get_children():
-            values = old_frame.printer_manager.tree.item(item, "values")
-            new_frame.printer_manager.tree.insert("", "end", values=values)
+        try:
+            for item in old_frame.printer_manager.tree.get_children():
+                values = old_frame.printer_manager.tree.item(item, "values")
+                new_frame.printer_manager.tree.insert("", "end", values=values)
+        except:
+            pass
         
-        # Удаляем старую вкладку
         self.tabview.delete(old_name)
         self.tabview.set(new_name)
         
-        # Обновляем сессии если нужно
         if not self.load_from_config:
             new_frame.refresh_sessions()
     
@@ -956,13 +943,6 @@ class HomeFrame(ctk.CTkFrame):
                         frame.update_treeview_style(appearance_mode)
             except Exception as e:
                 logger.error(f"Ошибка обновления стиля для вкладки {tab_name}: {e}")
-        
-        # Обновление стиля самого TabView
-        self.tabview.configure(
-            segmented_button_fg_color=("#979DA2", "#565B5E") if appearance_mode == "Dark" else ("#979DA2", "#565B5E"),
-            segmented_button_selected_color=("#3B8ED0", "#1F6AA5") if appearance_mode == "Dark" else ("#36719F", "#144870"),
-            segmented_button_selected_hover_color=("#36719F", "#144870") if appearance_mode == "Dark" else ("#2D5F84", "#0F3A57")
-        )
     
     def update_treeview_style(self, appearance_mode: str):
         """Обновление стиля таблиц."""
@@ -981,17 +961,3 @@ class HomeFrame(ctk.CTkFrame):
                         frame.cleanup()
             except Exception as e:
                 logger.error(f"Ошибка очистки ресурсов вкладки {tab_name}: {e}")
-    
-    def _adjust_all_tabs_columns(self):
-        """Автоматическая подстройка размеров колонок для всех вкладок."""
-        tab_names = list(self.tabview._tab_dict.keys())
-        
-        for tab_name in tab_names:
-            try:
-                tab_frame = self.tabview.tab(tab_name)
-                if tab_frame.winfo_children():
-                    frame = tab_frame.winfo_children()[0]
-                    if hasattr(frame, '_adjust_columns_width'):
-                        frame._adjust_columns_width()
-            except Exception as e:
-                logger.debug(f"Ошибка подстройки колонок для вкладки {tab_name}: {e}")
