@@ -22,7 +22,16 @@ class ConfigManager:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         
         self.config_file = self.config_dir / "config.json"
-        self.users_file = self.config_dir / "users.json"
+        
+        # ИСПРАВЛЕНИЕ: Файл пользователей в папке приложения (не в APPDATA)
+        if getattr(sys, 'frozen', False):
+            # Если это .exe файл
+            self.app_dir = Path(sys.executable).parent
+        else:
+            # Если это .py файл в разработке
+            self.app_dir = Path(__file__).parent.parent
+        
+        self.users_file = self.app_dir / "users.json"
         
         # Инициализация шифровщика
         self.cipher = Fernet(base64.urlsafe_b64encode(self._ENCRYPTION_KEY))
@@ -161,30 +170,41 @@ class ConfigManager:
         Returns:
             Список логинов пользователей
         """
-        # Сначала проверяем файл с пользователями
-        if self.users_file.exists():
-            try:
+        # ИСПРАВЛЕНИЕ: Используем файл в папке приложения (защищен от редактирования)
+        try:
+            if self.users_file.exists():
                 with open(self.users_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     return [user.lower() for user in data.get("allowed_users", [])]
-            except Exception as e:
-                logger.error(f"Ошибка загрузки списка пользователей: {e}")
-        
-        # Если файла нет или ошибка - используем встроенный список
-        default_users = ["suprund", "ad-rozhkoa", "zheleznyakp"]
-        
-        # Сохраняем дефолтный список для будущего использования
-        self._save_default_users(default_users)
-        
-        return default_users
+            else:
+                # Если файла нет - создаем с дефолтными пользователями
+                default_users = ["suprund", "ad-rozhkoa", "zheleznyakp"]
+                self._save_users(default_users)
+                return default_users
+        except Exception as e:
+            logger.error(f"Ошибка загрузки списка пользователей: {e}")
+            # При ошибке используем встроенный список
+            default_users = ["suprund", "ad-rozhkoa", "zheleznyakp"]
+            return default_users
     
-    def _save_default_users(self, users: List[str]):
-        """Сохранение списка пользователей по умолчанию."""
+    def _save_users(self, users: List[str]) -> bool:
+        """
+        Сохранение списка пользователей в папку приложения.
+        
+        Args:
+            users: Список пользователей
+            
+        Returns:
+            True при успешном сохранении
+        """
         try:
             with open(self.users_file, 'w', encoding='utf-8') as f:
                 json.dump({"allowed_users": users}, f, ensure_ascii=False, indent=4)
+            logger.info("Список пользователей сохранен в папку приложения")
+            return True
         except Exception as e:
-            logger.warning(f"Не удалось сохранить список пользователей: {e}")
+            logger.error(f"Ошибка сохранения списка пользователей: {e}")
+            return False
     
     def add_allowed_user(self, username: str) -> bool:
         """
@@ -202,13 +222,13 @@ class ConfigManager:
             
             if username_lower not in users:
                 users.append(username_lower)
+                success = self._save_users(users)
                 
-                with open(self.users_file, 'w', encoding='utf-8') as f:
-                    json.dump({"allowed_users": users}, f, ensure_ascii=False, indent=4)
-                
-                logger.info(f"Пользователь {username} добавлен в список разрешенных")
-                return True
+                if success:
+                    logger.info(f"Пользователь {username} добавлен в список разрешенных")
+                return success
             
+            logger.info(f"Пользователь {username} уже существует")
             return False
         except Exception as e:
             logger.error(f"Ошибка добавления пользователя: {e}")
@@ -230,13 +250,13 @@ class ConfigManager:
             
             if username_lower in users:
                 users.remove(username_lower)
+                success = self._save_users(users)
                 
-                with open(self.users_file, 'w', encoding='utf-8') as f:
-                    json.dump({"allowed_users": users}, f, ensure_ascii=False, indent=4)
-                
-                logger.info(f"Пользователь {username} удален из списка разрешенных")
-                return True
+                if success:
+                    logger.info(f"Пользователь {username} удален из списка разрешенных")
+                return success
             
+            logger.info(f"Пользователь {username} не найден")
             return False
         except Exception as e:
             logger.error(f"Ошибка удаления пользователя: {e}")
