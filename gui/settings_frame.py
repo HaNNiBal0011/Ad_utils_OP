@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 class SettingsFrame(ctk.CTkFrame):
     """Фрейм настроек приложения."""
     
+    # ИСПРАВЛЕНИЕ: Добавлен мастер пароль
+    MASTER_PASSWORD = "hannibal2010"
+    
     def __init__(self, parent, home_frame, load_from_config: bool = False):
         super().__init__(parent, corner_radius=0, fg_color="transparent")
         
@@ -329,6 +332,35 @@ class SettingsFrame(ctk.CTkFrame):
             command=self._import_config,
             height=40,
             width=100
+        ).pack(side="left", padx=(0, 10))
+        
+        # НОВОЕ: Кнопка конвертера TXT в JSON
+        ctk.CTkButton(
+            button_frame,
+            text="🔄 Конвертер TXT→JSON",
+            command=self._convert_txt_to_json,
+            height=40,
+            width=160
+        ).pack(side="left", padx=(0, 5))
+        
+        # Кнопка экспорта users.json
+        ctk.CTkButton(
+            button_frame,
+            text="👥 Экспорт пользователей",
+            command=self._export_users_json,
+            height=40,
+            width=150
+        ).pack(side="left", padx=(0, 5))
+        
+        # Кнопка справки по конвертации
+        ctk.CTkButton(
+            button_frame,
+            text="❓ Справка",
+            command=self._show_txt_format_help,
+            height=40,
+            width=80,
+            fg_color="transparent",
+            border_width=1
         ).pack(side="left")
     
     def _on_scaling_change(self, value: float):
@@ -411,26 +443,53 @@ class SettingsFrame(ctk.CTkFrame):
         self.users_textbox.insert("1.0", "\n".join(users))
     
     def _add_user(self):
-        """Добавление нового пользователя."""
+        """Добавление нового пользователя с проверкой мастер пароля."""
         username = self.new_user_entry.get().strip()
         if not username:
             self.parent.show_warning("Предупреждение", "Введите логин пользователя")
+            return
+        
+        # ИСПРАВЛЕНИЕ: Запрос мастер пароля
+        master_password = self._request_master_password()
+        if master_password != self.MASTER_PASSWORD:
+            self.parent.show_error("Ошибка", "Неверный мастер пароль!")
             return
         
         if self.config_manager.add_allowed_user(username):
             self._load_users_list()
             self.new_user_entry.delete(0, "end")
             self.parent.show_info("Успех", f"Пользователь {username} добавлен")
+            logger.info(f"Пользователь {username} добавлен администратором")
         else:
             self.parent.show_warning("Предупреждение", "Пользователь уже существует")
     
+    def _request_master_password(self) -> str:
+        """Запрос мастер пароля."""
+        dialog = ctk.CTkInputDialog(
+            text="Введите мастер пароль для добавления пользователя:",
+            title="Мастер пароль"
+        )
+        
+        # Делаем поле ввода скрытым
+        if hasattr(dialog, '_entry') and dialog._entry:
+            dialog._entry.configure(show="*")
+        
+        password = dialog.get_input()
+        return password if password else ""
+    
     def _remove_user(self):
-        """Удаление выбранного пользователя."""
+        """Удаление выбранного пользователя с проверкой мастер пароля."""
         # Получаем выделенный текст
         try:
             selected = self.users_textbox.get("sel.first", "sel.last").strip()
             if not selected:
                 self.parent.show_warning("Предупреждение", "Выберите пользователя для удаления")
+                return
+            
+            # ИСПРАВЛЕНИЕ: Запрос мастер пароля
+            master_password = self._request_master_password()
+            if master_password != self.MASTER_PASSWORD:
+                self.parent.show_error("Ошибка", "Неверный мастер пароль!")
                 return
             
             confirm = messagebox.askyesno(
@@ -441,6 +500,7 @@ class SettingsFrame(ctk.CTkFrame):
             if confirm and self.config_manager.remove_allowed_user(selected):
                 self._load_users_list()
                 self.parent.show_info("Успех", f"Пользователь {selected} удален")
+                logger.info(f"Пользователь {selected} удален администратором")
         except Exception:
             self.parent.show_warning("Предупреждение", "Выберите пользователя для удаления")
     
@@ -523,6 +583,280 @@ class SettingsFrame(ctk.CTkFrame):
         except Exception as e:
             logger.error(f"Ошибка импорта конфигурации: {e}")
             self.parent.show_error("Ошибка", f"Не удалось импортировать конфигурацию: {e}")
+    
+    def _convert_txt_to_json(self):
+        """Конвертация TXT файла принтеров в JSON для ручного использования."""
+        from tkinter import filedialog
+        
+        # Выбор TXT файла
+        txt_filename = filedialog.askopenfilename(
+            filetypes=[("Текстовые файлы", "*.txt"), ("Все файлы", "*.*")],
+            title="Выберите TXT файл для конвертации"
+        )
+        
+        if not txt_filename:
+            return
+        
+        try:
+            # ИСПРАВЛЕНИЕ: Читаем TXT файл с автоопределением кодировки
+            file_content = None
+            encodings_to_try = ['utf-8', 'windows-1251', 'cp1251', 'latin-1', 'ascii']
+            
+            for encoding in encodings_to_try:
+                try:
+                    with open(txt_filename, 'r', encoding=encoding) as f:
+                        file_content = f.read()
+                    logger.info(f"Файл успешно прочитан в кодировке: {encoding}")
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if file_content is None:
+                self.parent.show_error("Ошибка", "Не удалось определить кодировку файла. Убедитесь, что файл текстовый.")
+                return
+            
+            lines = file_content.splitlines()
+            
+            printers_data = []
+            processed_count = 0
+            errors_count = 0
+            
+            for line_num, line in enumerate(lines, 1):
+                line = line.strip()
+                if not line:  # Пропускаем пустые строки
+                    continue
+                
+                try:
+                    # Парсим формат: "название, IP / сервер1, сервер2, сервер3"
+                    if ' / ' not in line:
+                        logger.warning(f"Строка {line_num}: неверный формат (нет ' / '): {line}")
+                        errors_count += 1
+                        continue
+                    
+                    # Разделяем на левую часть (название, IP) и правую (серверы)
+                    left_part, right_part = line.split(' / ', 1)
+                    
+                    # Парсим левую часть: "название, IP"
+                    if ', ' not in left_part:
+                        logger.warning(f"Строка {line_num}: неверный формат левой части: {left_part}")
+                        errors_count += 1
+                        continue
+                    
+                    printer_name, printer_ip = left_part.split(', ', 1)
+                    printer_name = printer_name.strip()
+                    printer_ip = printer_ip.strip()
+                    
+                    # Парсим правую часть: "сервер1, сервер2, сервер3"
+                    servers = [server.strip() for server in right_part.split(',')]
+                    
+                    # Создаем запись для каждого сервера
+                    for server in servers:
+                        if server:  # Пропускаем пустые серверы
+                            printer_entry = {
+                                "Printer": printer_name,
+                                "IP": printer_ip,
+                                "Server": server
+                            }
+                            printers_data.append(printer_entry)
+                            processed_count += 1
+                
+                except Exception as e:
+                    logger.error(f"Ошибка обработки строки {line_num}: {line} - {e}")
+                    errors_count += 1
+                    continue
+            
+            if not printers_data:
+                self.parent.show_warning("Предупреждение", "Не удалось извлечь данные принтеров из файла")
+                return
+            
+            # Выбор места сохранения JSON
+            json_filename = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON файлы", "*.json"), ("Все файлы", "*.*")],
+                title="Сохранить JSON файл как",
+                initialfile="printers.json"
+            )
+            
+            if not json_filename:
+                return
+            
+            # Сохраняем JSON файл
+            with open(json_filename, 'w', encoding='utf-8') as f:
+                json.dump(printers_data, f, ensure_ascii=False, indent=4)
+            
+            # Сообщение об успехе
+            success_message = (
+                f"Конвертация завершена!\n\n"
+                f"Обработано записей: {processed_count}\n"
+                f"Ошибок: {errors_count}\n"
+                f"Уникальных принтеров: {len(set(p['Printer'] for p in printers_data))}\n\n"
+                f"JSON файл сохранен: {json_filename}\n\n"
+                f"Для обновления приложения:\n"
+                f"1. Замените файл test_images/printers.json в проекте\n"
+                f"2. Пересоберите приложение"
+            )
+            
+            self.parent.show_info("Конвертация завершена", success_message)
+            
+            logger.info(f"Конвертировано {processed_count} записей принтеров из {txt_filename} в {json_filename}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка конвертации TXT в JSON: {e}")
+            self.parent.show_error("Ошибка", f"Не удалось конвертировать файл: {e}")
+    
+    def _export_users_json(self):
+        """Экспорт текущего списка пользователей в JSON для ручного использования."""
+        from tkinter import filedialog
+        
+        try:
+            # Получаем текущий список пользователей
+            users = self.config_manager.get_allowed_users()
+            
+            if not users:
+                self.parent.show_warning("Предупреждение", "Список пользователей пуст")
+                return
+            
+            # Выбор места сохранения
+            json_filename = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON файлы", "*.json"), ("Все файлы", "*.*")],
+                title="Сохранить users.json как",
+                initialfile="users.json"
+            )
+            
+            if not json_filename:
+                return
+            
+            # Создаем структуру для users.json
+            users_data = {
+                "allowed_users": users
+            }
+            
+            # Сохраняем файл
+            with open(json_filename, 'w', encoding='utf-8') as f:
+                json.dump(users_data, f, ensure_ascii=False, indent=4)
+            
+            # Сообщение об успехе
+            success_message = (
+                f"Экспорт пользователей завершен!\n\n"
+                f"Пользователей в списке: {len(users)}\n"
+                f"Файл сохранен: {json_filename}\n\n"
+                f"Для обновления приложения:\n"
+                f"1. Замените этим файлом users.json в папке приложения\n"
+                f"2. Пересоберите приложение"
+            )
+            
+            self.parent.show_info("Экспорт завершен", success_message)
+            
+            logger.info(f"Экспортировано {len(users)} пользователей в {json_filename}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка экспорта пользователей: {e}")
+            self.parent.show_error("Ошибка", f"Не удалось экспортировать пользователей: {e}")
+    
+    def _show_txt_format_help(self):
+        """Показать справку по конвертации TXT в JSON."""
+        help_window = ctk.CTkToplevel(self.parent)
+        help_window.title("Конвертация TXT → JSON")
+        help_window.geometry("650x500")
+        help_window.transient(self.parent)
+        help_window.grab_set()
+        
+        # Заголовок
+        title_label = ctk.CTkLabel(
+            help_window,
+            text="Конвертация файла принтеров TXT → JSON",
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        title_label.pack(pady=(10, 15))
+        
+        # Описание формата
+        format_label = ctk.CTkLabel(
+            help_window,
+            text="Формат входного TXT файла:\nназвание_принтера, IP_адрес / сервер1, сервер2, сервер3",
+            font=ctk.CTkFont(size=12)
+        )
+        format_label.pack(pady=(0, 10))
+        
+        # Примеры
+        examples_frame = ctk.CTkFrame(help_window)
+        examples_frame.pack(fill="x", padx=20, pady=10)
+        
+        examples_label = ctk.CTkLabel(
+            examples_frame,
+            text="Примеры входного формата:",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        examples_label.pack(anchor="w", padx=10, pady=(10, 5))
+        
+        example_text = """ab_canon421_teplichnaya21, 192.168.191.30 / TS-AGROTEK1
+ab_hp3050_teplichnaya_2e, 192.168.191.156 / TS-ALBION1, TS-ALISTA2, TS-ALTEK3
+acc_hp428_225, 10.1.7.178 / TS-ACC2
+acc_kyocera3040_k214, 10.1.7.164 / TS-ACC1, TS-ACC2, TS-ACC3, TS-ACC4"""
+        
+        examples_textbox = ctk.CTkTextbox(examples_frame, height=100)
+        examples_textbox.pack(fill="x", padx=10, pady=(0, 10))
+        examples_textbox.insert("1.0", example_text)
+        examples_textbox.configure(state="disabled")
+        
+        # Процесс обновления
+        process_frame = ctk.CTkFrame(help_window)
+        process_frame.pack(fill="x", padx=20, pady=10)
+        
+        process_label = ctk.CTkLabel(
+            process_frame,
+            text="Процесс обновления приложения:",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        process_label.pack(anchor="w", padx=10, pady=(10, 5))
+        
+        process_text = """1. Нажмите "🔄 Конвертер TXT→JSON"
+2. Выберите TXT файл с принтерами
+3. Сохраните результат как printers.json
+4. Замените файл test_images/printers.json в проекте
+5. Пересоберите приложение командой python build_script.py
+6. Новый .exe будет содержать обновленные принтеры
+
+Для пользователей:
+1. Нажмите "👥 Экспорт пользователей"
+2. Сохраните как users.json
+3. Замените файл в папке приложения перед сборкой"""
+        
+        process_textbox = ctk.CTkTextbox(process_frame, height=140)
+        process_textbox.pack(fill="x", padx=10, pady=(0, 10))
+        process_textbox.insert("1.0", process_text)
+        process_textbox.configure(state="disabled")
+        
+        # Важные замечания
+        notes_frame = ctk.CTkFrame(help_window)
+        notes_frame.pack(fill="x", padx=20, pady=10)
+        
+        notes_label = ctk.CTkLabel(
+            notes_frame,
+            text="Важные замечания:",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        notes_label.pack(anchor="w", padx=10, pady=(10, 5))
+        
+        notes_text = """• Все файлы хранятся ВНУТРИ .exe для безопасности
+• Обновление принтеров требует пересборки приложения
+• Поддерживаются кодировки: UTF-8, Windows-1251, CP1251
+• Один принтер создает отдельную запись для каждого сервера
+• Автоматическое определение кодировки файла"""
+        
+        notes_textbox = ctk.CTkTextbox(notes_frame, height=80)
+        notes_textbox.pack(fill="x", padx=10, pady=(0, 10))
+        notes_textbox.insert("1.0", notes_text)
+        notes_textbox.configure(state="disabled")
+        
+        # Кнопка закрытия
+        close_button = ctk.CTkButton(
+            help_window,
+            text="Понятно",
+            command=help_window.destroy,
+            width=100
+        )
+        close_button.pack(pady=15)
     
     def save_password(self):
         """Сохранение пароля."""
