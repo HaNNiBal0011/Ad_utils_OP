@@ -20,8 +20,8 @@ class App(ctk.CTk):
         
         # Конфигурация окна
         self.title("RDP Manager")
-        self.geometry("1350x700")
-        self.minsize(1200, 600)
+        self.geometry("1400x800")  # ИСПРАВЛЕНИЕ: Увеличили размер окна
+        self.minsize(1300, 700)    # ИСПРАВЛЕНИЕ: Увеличили минимальный размер
         
         # Установка иконки приложения
         self._set_window_icon()
@@ -29,10 +29,10 @@ class App(ctk.CTk):
         # Инициализация менеджера конфигурации
         self.config_manager = ConfigManager()
         
-        # Настройка сетки
+        # ИСПРАВЛЕНИЕ: Правильная настройка сетки главного окна
         self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=0)
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=0)  # Навигация - фиксированная ширина
+        self.grid_columnconfigure(1, weight=1)  # Основное содержимое - растягивается
         
         # Загрузка темы из конфигурации
         self._load_theme()
@@ -46,8 +46,10 @@ class App(ctk.CTk):
         # Выбор начального фрейма
         self.select_frame_by_name("home")
         
-        # Обновление интерфейса
-        self.after(100, self._post_init)
+        # ИСПРАВЛЕНИЕ: Поэтапная инициализация для корректного отображения
+        self.after(50, self._post_init_stage1)
+        self.after(150, self._post_init_stage2)
+        self.after(300, self._post_init_final)
         
     def _set_window_icon(self):
         """Установка иконки окна."""
@@ -107,13 +109,43 @@ class App(ctk.CTk):
             except Exception as e:
                 logger.error(f"Ошибка загрузки настроек: {e}")
     
-    def _post_init(self):
-        """Действия после инициализации."""
-        # Центрирование окна
-        self.center_window()
-        
-        # Принудительное обновление
-        self.update_idletasks()
+    def _post_init_stage1(self):
+        """Этап 1: Принудительное обновление и центрирование."""
+        try:
+            # Центрирование окна
+            self.center_window()
+            
+            # Принудительное обновление
+            self.update_idletasks()
+            
+            # Обновляем все дочерние элементы
+            for child in self.winfo_children():
+                child.update_idletasks()
+                
+        except Exception as e:
+            logger.debug(f"Ошибка этапа 1 инициализации: {e}")
+    
+    def _post_init_stage2(self):
+        """Этап 2: Обновление фреймов."""
+        try:
+            # Обновляем home_frame если он активен
+            if hasattr(self, 'home_frame') and self.home_frame.winfo_viewable():
+                self.home_frame.update_idletasks()
+                
+        except Exception as e:
+            logger.debug(f"Ошибка этапа 2 инициализации: {e}")
+    
+    def _post_init_final(self):
+        """Финальный этап инициализации."""
+        try:
+            # Финальное обновление всех элементов
+            self.update_idletasks()
+            self.update()
+            
+            logger.debug("Инициализация главного окна завершена")
+            
+        except Exception as e:
+            logger.debug(f"Ошибка финального этапа инициализации: {e}")
     
     def center_window(self):
         """Центрирование окна на экране."""
