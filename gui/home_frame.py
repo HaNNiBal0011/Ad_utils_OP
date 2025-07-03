@@ -49,6 +49,21 @@ class TabHomeFrame(ctk.CTkFrame):
         
         # Автоматическая подстройка размеров колонок после отрисовки
         self.after(100, self._adjust_columns_width)
+        
+        # ИСПРАВЛЕНИЕ: Принудительное обновление отображения
+        self.after(10, self._force_update_display)
+    
+    def _force_update_display(self):
+        """Принудительное обновление отображения интерфейса."""
+        try:
+            self.update_idletasks()
+            # Обновляем все дочерние элементы
+            for child in self.winfo_children():
+                child.update_idletasks()
+            # Перерисовываем фрейм
+            self.update()
+        except Exception as e:
+            logger.debug(f"Ошибка принудительного обновления: {e}")
     
     def _setup_grid(self):
         """Настройка сетки фрейма."""
@@ -818,12 +833,39 @@ class HomeFrame(ctk.CTkFrame):
             self.initial_tab_names = ["Сервер 1", "Сервер 2", "Сервер 3"]
             for tab_name in self.initial_tab_names:
                 self._create_tab(tab_name)
+            
+            # ИСПРАВЛЕНИЕ: Устанавливаем первую вкладку как активную
+            if self.initial_tab_names:
+                self.tabview.set(self.initial_tab_names[0])
         
         # Обновление стилей
         self.update_treeview_style(ctk.get_appearance_mode())
         
+        # ИСПРАВЛЕНИЕ: Принудительное обновление отображения
+        self.after(50, self._force_display_update)
+        
         # Автоматическая подстройка размеров колонок для всех вкладок после создания
         self.after(200, self._adjust_all_tabs_columns)
+    
+    def _force_display_update(self):
+        """Принудительное обновление отображения всех вкладок."""
+        try:
+            # Обновляем отображение TabView
+            self.tabview.update_idletasks()
+            
+            # Обновляем все созданные вкладки
+            for tab_name in list(self.tabview._tab_dict.keys()):
+                tab_frame = self.tabview.tab(tab_name)
+                if tab_frame.winfo_children():
+                    frame = tab_frame.winfo_children()[0]
+                    if hasattr(frame, '_force_update_display'):
+                        frame._force_update_display()
+            
+            # Обновляем главный фрейм
+            self.update_idletasks()
+            self.update()
+        except Exception as e:
+            logger.debug(f"Ошибка принудительного обновления отображения: {e}")
     
     def _create_tab(self, tab_name: str, config_data: Optional[Dict] = None) -> TabHomeFrame:
         """Создание новой вкладки."""
@@ -881,7 +923,7 @@ class HomeFrame(ctk.CTkFrame):
             "printer_tree_columns": old_frame.get_treeview_column_widths(old_frame.printer_manager.tree)
         }
         
-        # Создаем новую вкладку
+        # Создаем новую вкладку с новым именем
         new_frame = self._create_tab(new_name, config_data)
         
         # Копируем данные таблиц
