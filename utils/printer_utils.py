@@ -36,6 +36,9 @@ class PrinterManager:
         self.search_entry = None
         self.status_label = None
         
+        # Флаг для режима поиска
+        self.search_mode = False
+        
         # Кэш статусов принтеров
         self._status_cache: Dict[str, Tuple[str, datetime]] = {}
         self._cache_timeout = 300  # 5 минут
@@ -62,6 +65,7 @@ class PrinterManager:
         )
         self.search_entry.pack(side="left", padx=(0, 5))
         self.search_entry.bind("<KeyRelease>", self._on_search_change)
+        self.search_entry.bind("<Return>", lambda e: self.search_printers())
         
         # Кнопки
         button_frame = ctk.CTkFrame(search_container, fg_color="transparent")
@@ -76,6 +80,17 @@ class PrinterManager:
         )
         self.search_button.pack(side="left", padx=(0, 5))
         
+        # Кнопка очистки поиска
+        self.clear_search_button = ctk.CTkButton(
+            button_frame,
+            text="✖",
+            width=30,
+            command=self.clear_search,
+            fg_color="transparent",
+            hover_color=("gray70", "gray30")
+        )
+        self.clear_search_button.pack(side="left", padx=(0, 5))
+        
         # Кнопка обновления
         self.refresh_button = ctk.CTkButton(
             button_frame,
@@ -83,7 +98,18 @@ class PrinterManager:
             command=self.refresh_printers,
             width=100
         )
-        self.refresh_button.pack(side="left")
+        self.refresh_button.pack(side="left", padx=(0, 5))
+        
+        # ИСПРАВЛЕНИЕ: Кнопка проверки статусов принтеров
+        self.check_status_button = ctk.CTkButton(
+            button_frame,
+            text="📊 Статусы",
+            command=self._start_status_check,
+            width=100,
+            fg_color="transparent",
+            border_width=1
+        )
+        self.check_status_button.pack(side="left")
         
         # Статус
         self.status_label = ctk.CTkLabel(
@@ -103,12 +129,12 @@ class PrinterManager:
         # Настройка Treeview
         self._setup_treeview(tree_height, tree_columns)
         
-        # Начальное отображение
-        self.refresh_printers()
+        # ИСПРАВЛЕНИЕ: Убираем автоматическое обновление при запуске для быстроты
+        # Начальное отображение будет только при первом клике
     
     def _setup_treeview(self, height: int, column_widths: Optional[Dict]):
         """Настройка таблицы принтеров."""
-        columns = ("Printer", "IP", "Server", "Status")  # Убрали Model
+        columns = ("Printer", "IP", "Server", "Status")
         self.tree = ttk.Treeview(
             self.printer_frame,
             columns=columns,
@@ -145,7 +171,7 @@ class PrinterManager:
         self.tree.tag_configure("unknown", foreground="gray")
     
     def _load_printers(self):
-        """Загрузка списка принтеров из файла."""
+        """БЫСТРАЯ загрузка списка принтеров из файла."""
         file_path = self._get_resource_path("test_images/printers.json")
         
         try:
@@ -153,18 +179,28 @@ class PrinterManager:
                 data = json.load(f)
                 
             self.printers = []
+            
+            # ИСПРАВЛЕНИЕ: Упрощенная загрузка без проверки дублей при запуске
             for item in data:
+                printer_name = item.get("Printer", "").strip()
+                printer_ip = item.get("IP", "").strip()
+                printer_server = item.get("Server", "").strip()
+                
+                # Пропускаем только совсем пустые записи
+                if not printer_name and not printer_ip:
+                    continue
+                
                 printer = Printer(
-                    name=item.get("Printer", ""),
-                    ip=item.get("IP", ""),
-                    server=item.get("Server", ""),
-                    model=None,  # Больше не используем
-                    location=item.get("Location"),
+                    name=printer_name,
+                    ip=printer_ip,
+                    server=printer_server,
+                    model=None,
+                    location=item.get("Location", "").strip(),
                     status="Неизвестно"
                 )
                 self.printers.append(printer)
             
-            logger.info(f"Загружено {len(self.printers)} принтеров")
+            logger.info(f"Быстро загружено {len(self.printers)} принтеров")
             
         except FileNotFoundError:
             logger.warning(f"Файл принтеров не найден: {file_path}")
@@ -199,47 +235,113 @@ class PrinterManager:
         except Exception as e:
             logger.error(f"Ошибка создания файла принтеров: {e}")
     
-    def refresh_printers(self):
-        """Обновление списка принтеров с фильтрацией по серверу."""
-        server_filter = self.parent.server_entry.get().strip().lower()
-        search_text = self.search_entry.get().strip().lower()
+    def search_printers(self):
+        """ИСПРАВЛЕННЫЙ поиск принтеров по названию, IP и серверу."""
+        search_text = self.search_entry.get().strip()
         
-        # Фильтрация принтеров
+        if not search_text:
+            self.clear_search()
+            return
+        
+        # Включаем режим поиска
+        self.search_mode = True
+        
+        search_text_lower = search_text.lower()
         self.filtered_printers = []
-        seen_printers = set()  # Для отслеживания уже добавленных принтеров
+        seen_printers = set()  # Для удаления дублей
+        
+        # Поиск по всем принтерам без учета текущего сервера
+        for printer in self.printers:
+            # Проверяем совпадения в названии, IP и сервере
+            matches = False
+            
+            # Поиск в названии принтера
+            if search_text_lower in printer.name.lower():
+                matches = True
+            
+            # Поиск в IP адресе
+            elif search_text_lower in printer.ip.lower():
+                matches = True
+            
+            # Поиск в названии сервера
+            elif search_text_lower in printer.server.lower():
+                matches = True
+            
+            # Поиск в расположении (если есть)
+            elif printer.location and search_text_lower in printer.location.lower():
+                matches = True
+            
+            if matches:
+                # ИСПРАВЛЕНИЕ: Избегаем дублей при поиске тоже
+                unique_key = f"{printer.ip.lower()}:{printer.name.lower()}"
+                if unique_key not in seen_printers:
+                    seen_printers.add(unique_key)
+                    self.filtered_printers.append(printer)
+        
+        # Сортировка результатов поиска
+        self.filtered_printers.sort(key=lambda p: (p.name.lower(), p.ip))
+        
+        # Обновляем отображение
+        self._update_treeview()
+        
+        # Обновляем статус
+        if self.filtered_printers:
+            status_text = f"Найдено: {len(self.filtered_printers)} принтеров по запросу '{search_text}'"
+        else:
+            status_text = f"Принтеры не найдены по запросу '{search_text}'"
+        
+        self.status_label.configure(text=status_text)
+        
+        logger.info(f"Поиск '{search_text}': найдено {len(self.filtered_printers)} принтеров")
+    
+    def clear_search(self):
+        """Очистка поиска и возврат к обычному режиму."""
+        self.search_entry.delete(0, "end")
+        self.search_mode = False
+        self.refresh_printers()
+    
+    def refresh_printers(self):
+        """Обновление списка принтеров с фильтрацией по серверу (если не в режиме поиска)."""
+        if self.search_mode:
+            # В режиме поиска не обновляем автоматически
+            return
+        
+        server_filter = self.parent.server_entry.get().strip().lower()
+        
+        # Фильтрация принтеров по серверу с удалением дублей
+        self.filtered_printers = []
+        seen_printers = set()  # Для отслеживания уникальных принтеров
         
         for printer in self.printers:
-            # Фильтр по серверу
+            # Фильтр по серверу (только если указан сервер)
             if server_filter and printer.server.lower() != server_filter:
                 continue
             
-            # Фильтр по поиску
-            if search_text:
-                if not any(search_text in str(getattr(printer, attr, "")).lower() 
-                        for attr in ['name', 'ip', 'server', 'location']):
-                    continue
+            # ИСПРАВЛЕНИЕ: Создаем уникальный ключ из IP + названия принтера
+            # для более надежного удаления дублей
+            unique_key = f"{printer.ip.lower()}:{printer.name.lower()}"
             
-            # Проверяем на дублирование принтеров
-            # Всегда исключаем дубли по IP адресу, но при общем поиске 
-            # показываем принтер с наиболее релевантным сервером
-            printer_key = printer.ip
-            
-            if printer_key not in seen_printers:
-                seen_printers.add(printer_key)
+            # Избегаем дубликатов
+            if unique_key not in seen_printers:
+                seen_printers.add(unique_key)
                 self.filtered_printers.append(printer)
+        
+        # Дополнительная сортировка для стабильного порядка
+        self.filtered_printers.sort(key=lambda p: (p.name.lower(), p.ip))
         
         # Обновление таблицы
         self._update_treeview()
         
         # Обновление статуса
-        status_text = f"Найдено: {len(self.filtered_printers)} из {len(self.printers)}"
         if server_filter:
-            status_text += f" (сервер: {server_filter})"
+            status_text = f"Сервер {server_filter.upper()}: {len(self.filtered_printers)} принтеров"
+        else:
+            status_text = f"Всего принтеров: {len(self.filtered_printers)}"
+        
         self.status_label.configure(text=status_text)
         
-        # Запуск проверки статусов в фоне
-        if self.filtered_printers:
-            self._start_status_check()
+        # ИСПРАВЛЕНИЕ: Убираем автоматическую проверку статусов для быстроты
+        # Статусы будут проверяться только по требованию пользователя
     
     def _update_treeview(self):
         """Обновление содержимого таблицы."""
@@ -282,14 +384,14 @@ class PrinterManager:
         else:
             return "unknown"
     
-    def search_printers(self):
-        """Поиск принтеров по запросу."""
-        self.refresh_printers()
-    
     def _on_search_change(self, event):
-        """Обработка изменения поискового запроса."""
-        # Автоматический поиск при вводе
-        self.refresh_printers()
+        """Обработка изменения поискового запроса при вводе."""
+        # Автоматический поиск при вводе (можно отключить если не нужно)
+        search_text = self.search_entry.get().strip()
+        if not search_text:
+            # Если поле очищено - выходим из режима поиска
+            if self.search_mode:
+                self.clear_search()
     
     def _on_double_click(self, event):
         """Обработка двойного клика по принтеру."""
@@ -412,32 +514,51 @@ class PrinterManager:
             return False
     
     def import_printer_list(self, filename: str):
-        """Импорт списка принтеров из файла."""
+        """БЫСТРЫЙ импорт списка принтеров из файла."""
         try:
             with open(filename, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
             self.printers = []
+            
+            # ИСПРАВЛЕНИЕ: Упрощенный импорт без сложных проверок
             for item in data:
+                printer_name = item.get("Printer", "").strip()
+                printer_ip = item.get("IP", "").strip()
+                printer_server = item.get("Server", "").strip()
+                
+                # Пропускаем только совсем пустые записи
+                if not printer_name and not printer_ip:
+                    continue
+                
                 printer = Printer(
-                    name=item.get("Printer", ""),
-                    ip=item.get("IP", ""),
-                    server=item.get("Server", ""),
-                    model=None,  # Больше не используем
-                    location=item.get("Location"),
+                    name=printer_name,
+                    ip=printer_ip,
+                    server=printer_server,
+                    model=None,
+                    location=item.get("Location", "").strip(),
                     status="Неизвестно"
                 )
                 self.printers.append(printer)
             
             # Сохраняем в файл по умолчанию
             default_path = self._get_resource_path("test_images/printers.json")
+            clean_data = []
+            for printer in self.printers:
+                clean_data.append({
+                    "Printer": printer.name,
+                    "IP": printer.ip,
+                    "Server": printer.server,
+                    "Location": printer.location
+                })
+            
             with open(default_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
+                json.dump(clean_data, f, ensure_ascii=False, indent=4)
             
             # Обновляем отображение
             self.refresh_printers()
             
-            logger.info(f"Импортировано {len(self.printers)} принтеров")
+            logger.info(f"Быстро импортировано {len(self.printers)} принтеров")
             return True
             
         except Exception as e:
@@ -445,11 +566,11 @@ class PrinterManager:
             return False
     
     def add_printer(self, printer: Printer) -> bool:
-        """Добавление нового принтера."""
+        """БЫСТРОЕ добавление нового принтера."""
         try:
-            # Проверка на дубликаты
+            # ИСПРАВЛЕНИЕ: Упрощенная проверка только по IP
             for existing in self.printers:
-                if existing.ip == printer.ip:
+                if existing.ip.lower() == printer.ip.lower():
                     logger.warning(f"Принтер с IP {printer.ip} уже существует")
                     return False
             
@@ -457,7 +578,7 @@ class PrinterManager:
             self._save_printers()
             self.refresh_printers()
             
-            logger.info(f"Добавлен принтер: {printer.name}")
+            logger.info(f"Добавлен принтер: {printer.name} ({printer.ip})")
             return True
             
         except Exception as e:
@@ -539,9 +660,16 @@ class PrinterManager:
                         return
                 
                 # Используем процентное распределение
-                for col, (_, percentage) in self.column_config.items():
-                    width = int(available_width * percentage)
-                    self.tree.column(col, width=width)
+                widths = {
+                    "Printer": int(available_width * 0.40),
+                    "IP": int(available_width * 0.25),
+                    "Server": int(available_width * 0.20),
+                    "Status": int(available_width * 0.15)
+                }
+                
+                for col, width in widths.items():
+                    if col in self.tree["columns"]:
+                        self.tree.column(col, width=width)
         except Exception as e:
             logger.debug(f"Ошибка подстройки колонок принтеров: {e}")
     
