@@ -50,7 +50,7 @@ class NavigationFrame(ctk.CTkFrame):
             self.home_image = self._load_image(image_path, "home", icon_size)
             self.chat_image = self._load_image(image_path, "chat", icon_size)
             self.settings_image = self._load_image(image_path, "add_user", icon_size)
-            self.powershell_image = self._load_image(image_path, "powershell", icon_size)
+            self.vnc_image = self._load_image(image_path, "vnc", icon_size)
         except Exception as e:
             logger.error(f"Ошибка загрузки изображений: {e}")
             # Создаем пустые изображения как fallback
@@ -106,7 +106,8 @@ class NavigationFrame(ctk.CTkFrame):
         button_config = [
             ("home", "Shadow RDP", self.home_image, 2),
             ("frame_3", "Настройки", self.settings_image, 3),
-            # ("powershell", "PowerShell", self.powershell_image, 4),  # Закомментировано
+            ("vnc", "VNC Viewer", self.vnc_image, 4),  # Добавляем VNC
+            # ("powershell", "PowerShell", self.powershell_image, 5),  # Закомментировано
         ]
         
         for name, text, image, row in button_config:
