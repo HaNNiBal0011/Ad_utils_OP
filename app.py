@@ -3,6 +3,7 @@ from gui.navigation import NavigationFrame
 from gui.home_frame import HomeFrame
 from gui.settings_frame import SettingsFrame
 from utils.config import ConfigManager
+from gui.vnc_viewer_frame import VNCViewerFrame
 import logging
 import os
 import sys
@@ -95,6 +96,7 @@ class App(ctk.CTk):
                 self.home_frame, 
                 load_from_config=self.config_exists
             )
+            self.vnc_frame = VNCViewerFrame(self, self)
             
         except Exception as e:
             logger.error(f"Ошибка инициализации фреймов: {e}", exc_info=True)
@@ -176,12 +178,16 @@ class App(ctk.CTk):
         # Скрываем все фреймы
         self.home_frame.grid_forget()
         self.settings_frame.grid_forget()
+        if hasattr(self, 'vnc_frame'):
+            self.vnc_frame.grid_forget()
         
         # Отображаем выбранный фрейм
         if name == "home":
             self.home_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 5), pady=5)
         elif name == "settings" or name == "frame_3":  # Поддержка обоих имен
             self.settings_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 5), pady=5)
+        elif name == "vnc":
+            self.vnc_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 5), pady=5)
         else:
             logger.warning(f"Неизвестный фрейм: {name}")
             # По умолчанию показываем home
@@ -213,6 +219,8 @@ class App(ctk.CTk):
             # Закрываем соединения с AD если есть
             if hasattr(self.home_frame, 'cleanup'):
                 self.home_frame.cleanup()
+            if hasattr(self, 'vnc_frame') and hasattr(self.vnc_frame, 'cleanup'):
+                self.vnc_frame.cleanup()
         except Exception as e:
             logger.error(f"Ошибка очистки ресурсов: {e}")
     
