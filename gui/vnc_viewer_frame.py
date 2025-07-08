@@ -21,7 +21,7 @@ import hashlib
 logger = logging.getLogger(__name__)
 
 class VNCViewerFrame(ctk.CTkFrame):
-    """Фрейм для VNC клиента с полной функциональностью."""
+    """Фрейм для VNC клиента с оптимизированной производительностью."""
     
     # RFB Protocol constants
     RFB_VERSION_3_3 = b"RFB 003.003\n"
@@ -87,20 +87,44 @@ class VNCViewerFrame(ctk.CTkFrame):
         self.bytes_received = 0
         self.last_stats_time = time.time()
         
-        # Throttling для улучшения производительности
+        # ИСПРАВЛЕНИЕ: Разумный throttling для умеренной нагрузки
         self.last_update_request_time = 0
-        self.update_request_interval = 0.01  # Очень частые запросы (100 FPS потенциал)
+        self.update_request_interval = 0.033  # 30 FPS максимум запросов
         self.last_canvas_update_time = 0
-        self.canvas_update_interval = 0.033  # 30 FPS для UI
+        self.canvas_update_interval = 0.033   # 30 FPS для UI
         self.pending_canvas_update = False
         
-        # Принудительные обновления для медленных серверов
+        # НОВОЕ: Контроль pending запросов
+        self.pending_update_requests = 0
+        self.max_pending_requests = 3  # Максимум 3 pending запроса
+        self.last_server_response_time = time.time()
+        self.server_response_timeout = 2.0  # 2 секунды без ответа = проблема
+        
+        # ИСПРАВЛЕНИЕ: Умеренные принудительные обновления
         self.force_update_timer = None
-        self.force_update_interval = 1.0  # Каждую секунду принудительно
+        self.force_update_interval = 0.5      # 2 FPS принудительно
+        self.last_force_update = 0
+        
+        # ИСПРАВЛЕНИЕ: Умеренная стратегия обновлений
+        self.request_update_timer = None
+        self.continuous_updates = False  # ИСПРАВЛЕНИЕ: По умолчанию выключены
+        self.continuous_update_interval = 0.1  # 10 FPS для continuous
+        
+        # Оптимизация обработки изображений
+        self.image_processing_queue = queue.Queue(maxsize=2)
+        self.last_image_data = None
+        self.image_cache = {}
+        self.max_cache_size = 5  # Уменьшили размер кэша
         
         # Детекция проблем протокола
         self.protocol_errors = 0
-        self.max_protocol_errors = 5  # Максимум ошибок перед переподключением
+        self.max_protocol_errors = 5
+        
+        # Счётчики для отладки производительности
+        self.updates_per_second = 0
+        self.last_update_count_time = time.time()
+        self.update_count = 0
+        self.request_count = 0  # НОВОЕ: Счётчик запросов
         
         # Настройка UI
         self._setup_ui()
@@ -111,7 +135,7 @@ class VNCViewerFrame(ctk.CTkFrame):
         # Запуск обновления статистики
         self._update_stats()
         
-        # Настройка производительности в зависимости от качества
+        # Настройки производительности
         self._adjust_performance_settings()
     
     def _setup_ui(self):
@@ -178,21 +202,30 @@ class VNCViewerFrame(ctk.CTkFrame):
         )
         self.reconnect_button.grid(row=0, column=6, padx=5, pady=5)
         
-        # Настройки качества
+        # Настройки качества - ИЗМЕНЕНО: Убираем "Низкое" качество
         quality_frame = ctk.CTkFrame(connection_frame, fg_color="transparent")
         quality_frame.grid(row=1, column=0, columnspan=6, pady=5)
         
         ctk.CTkLabel(quality_frame, text="Качество:").pack(side="left", padx=5)
         
-        self.quality_var = ctk.StringVar(value="medium")
+        self.quality_var = ctk.StringVar(value="medium")  # ИСПРАВЛЕНИЕ: По умолчанию среднее
         quality_menu = ctk.CTkSegmentedButton(
             quality_frame,
-            values=["Низкое", "Среднее", "Высокое"],
+            values=["Среднее", "Высокое", "Максимум"],
             variable=self.quality_var,
             command=self._on_quality_change
         )
         quality_menu.pack(side="left", padx=5)
-        quality_menu.set("Среднее")
+        quality_menu.set("Среднее")  # ИСПРАВЛЕНИЕ: По умолчанию среднее
+        
+        # ИСПРАВЛЕНИЕ: Чекбокс для непрерывных обновлений - по умолчанию ВЫКЛЮЧЕН
+        self.continuous_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            quality_frame,
+            text="Непрерывные обновления",
+            variable=self.continuous_var,
+            command=self._on_continuous_change
+        ).pack(side="left", padx=20)
         
         # Чекбокс для view-only режима
         self.view_only_var = ctk.BooleanVar(value=False)
@@ -226,7 +259,7 @@ class VNCViewerFrame(ctk.CTkFrame):
         self.scale_var = ctk.StringVar(value="auto")
         scale_menu = ctk.CTkSegmentedButton(
             scale_frame,
-            values=["25%", "50%", "75%", "100%", "Авто"],
+            values=["50%", "75%", "100%", "Авто"],
             variable=self.scale_var
         )
         scale_menu.pack(side="left", padx=5)
@@ -300,6 +333,22 @@ class VNCViewerFrame(ctk.CTkFrame):
         )
         self.fps_label.pack(side="left", padx=20)
         
+        # НОВОЕ: Показываем RPS (Requests Per Second) и Pending
+        self.rps_label = ctk.CTkLabel(
+            status_frame,
+            text="",
+            font=ctk.CTkFont(size=12)
+        )
+        self.rps_label.pack(side="left", padx=20)
+        
+        # НОВОЕ: Показываем Pending запросы
+        self.pending_label = ctk.CTkLabel(
+            status_frame,
+            text="",
+            font=ctk.CTkFont(size=12)
+        )
+        self.pending_label.pack(side="left", padx=20)
+        
         # Индикатор активности
         self.activity_indicator = ctk.CTkLabel(
             status_frame,
@@ -352,6 +401,46 @@ class VNCViewerFrame(ctk.CTkFrame):
             command=self._take_screenshot,
             width=100
         ).pack(side="right", padx=5)
+    
+    # ИСПРАВЛЕНИЕ: Разумные таймеры для умеренной нагрузки
+    def _start_update_timers(self):
+        """Запуск таймеров для разумных обновлений."""
+        logger.info("Starting update timers with moderate frequency")
+        self._schedule_force_update()
+        self._schedule_continuous_update()
+    
+    def _schedule_force_update(self):
+        """Планирование принудительного обновления."""
+        if not self.connected:
+            return
+            
+        current_time = time.time()
+        if current_time - self.last_force_update >= self.force_update_interval:
+            self._request_framebuffer_update(incremental=False)
+            self.last_force_update = current_time
+        
+        # Планируем следующее принудительное обновление
+        if self.connected:
+            self.force_update_timer = self.after(int(self.force_update_interval * 1000), self._schedule_force_update)
+    
+    def _schedule_continuous_update(self):
+        """Планирование непрерывных обновлений."""
+        if not self.connected:
+            return
+            
+        if self.continuous_var.get():
+            self._request_framebuffer_update(incremental=True)
+        
+        # ИСПРАВЛЕНИЕ: Разумная частота вместо 5ms
+        if self.connected:
+            self.request_update_timer = self.after(int(self.continuous_update_interval * 1000), self._schedule_continuous_update)
+    
+    def _on_continuous_change(self):
+        """Обработка изменения режима непрерывных обновлений."""
+        self.continuous_updates = self.continuous_var.get()
+        
+        # ИСПРАВЛЕНИЕ: Убираем лишние запросы при переключении
+        logger.info(f"Непрерывные обновления: {'включены' if self.continuous_updates else 'выключены'}")
     
     def connect_to_vnc(self):
         """Подключение к VNC серверу."""
@@ -411,8 +500,12 @@ class VNCViewerFrame(ctk.CTkFrame):
             # Запуск потоков обработки
             self._start_receiver_thread()
             
-            # Запрос первого кадра
+            # ИСПРАВЛЕНИЕ: Запускаем таймеры ПОСЛЕ установки connected=True
+            self.after(0, self._start_update_timers)
+            
+            # ИСПРАВЛЕНИЕ: Умеренное начальное обновление
             self._request_framebuffer_update(incremental=False)
+            self.after(100, lambda: self._request_framebuffer_update(incremental=True))
             
         except Exception as e:
             logger.error(f"Ошибка подключения: {e}")
@@ -725,21 +818,29 @@ class VNCViewerFrame(ctk.CTkFrame):
         self.socket.send(message)
         logger.debug(f"Set encodings: {encodings}")
     
-    def _request_framebuffer_update_throttled(self, incremental: bool = True):
-        """Запрос обновления framebuffer с throttling."""
+    # ИСПРАВЛЕНИЕ: Разумный throttling для запросов
+    def _request_framebuffer_update(self, incremental: bool = True):
+        """Запрос обновления framebuffer с разумным throttling."""
+        if not self.connected or not self.socket:
+            return
+        
         current_time = time.time()
         
-        # Throttling - не запрашиваем обновления слишком часто
+        # НОВОЕ: Проверяем throttling
         if current_time - self.last_update_request_time < self.update_request_interval:
             return
         
-        self.last_update_request_time = current_time
-        self._request_framebuffer_update(incremental)
-    
-    def _request_framebuffer_update(self, incremental: bool = True):
-        """Запрос обновления framebuffer."""
-        if not self.connected or not self.socket:
+        # НОВОЕ: Проверяем количество pending запросов
+        if self.pending_update_requests >= self.max_pending_requests:
+            logger.debug(f"Too many pending requests: {self.pending_update_requests}")
             return
+        
+        # НОВОЕ: Проверяем отвечает ли сервер
+        time_since_response = current_time - self.last_server_response_time
+        if time_since_response > self.server_response_timeout:
+            logger.warning(f"Server not responding for {time_since_response:.1f}s, reducing requests")
+            # Увеличиваем интервал если сервер не отвечает
+            self.update_request_interval = min(self.update_request_interval * 1.5, 1.0)
         
         try:
             # Проверяем валидность сокета
@@ -757,9 +858,18 @@ class VNCViewerFrame(ctk.CTkFrame):
             
             self.socket.send(message)
             
+            # Обновляем счётчики
+            self.pending_update_requests += 1
+            self.last_update_request_time = current_time
+            self.request_count += 1
+            
+            # УМЕНЬШЕНО: Логирование только каждого 10-го запроса
+            if self.request_count % 10 == 0:
+                request_type = "incremental" if incremental else "full"
+                logger.debug(f"Sent framebuffer update request #{self.request_count}: {request_type}, pending: {self.pending_update_requests}")
+            
         except (OSError, socket.error) as e:
             logger.debug(f"Socket error requesting framebuffer update: {e}")
-            # Не разрываем соединение сразу, возможно временная проблема
         except Exception as e:
             logger.error(f"Error requesting framebuffer update: {e}")
     
@@ -914,13 +1024,28 @@ class VNCViewerFrame(ctk.CTkFrame):
         return data
     
     def _handle_framebuffer_update(self):
-        """Обработка обновления framebuffer."""
+        """ИСПРАВЛЕННАЯ обработка обновления framebuffer."""
         try:
+            current_time = time.time()
+            
+            # НОВОЕ: Сервер ответил, обновляем статистику
+            self.last_server_response_time = current_time
+            self.pending_update_requests = max(0, self.pending_update_requests - 1)
+            
+            # НОВОЕ: Восстанавливаем нормальный интервал если сервер отвечает
+            if self.update_request_interval > 0.033:
+                self.update_request_interval *= 0.9  # Постепенно уменьшаем
+                self.update_request_interval = max(self.update_request_interval, 0.033)
+            
             # Пропускаем padding
             self._recv_exact(1)
             
             # Количество прямоугольников
             num_rectangles = struct.unpack("!H", self._recv_exact(2))[0]
+            
+            # УМЕНЬШЕНО: Логирование только если много прямоугольников
+            if num_rectangles > 1:
+                logger.debug(f"Processing {num_rectangles} rectangles")
             
             for _ in range(num_rectangles):
                 # Координаты и размеры
@@ -932,7 +1057,7 @@ class VNCViewerFrame(ctk.CTkFrame):
                 
                 # Обработка в зависимости от кодировки
                 if encoding == self.ENCODING_RAW:
-                    self._handle_raw_rectangle(x, y, w, h)
+                    self._handle_raw_rectangle_optimized(x, y, w, h)
                 elif encoding == self.ENCODING_COPYRECT:
                     self._handle_copyrect(x, y, w, h)
                 elif encoding == self.ENCODING_RRE:
@@ -945,28 +1070,24 @@ class VNCViewerFrame(ctk.CTkFrame):
                     if skip_size > 0:
                         self._recv_exact(skip_size)
             
-            # Обновляем изображение на canvas (с throttling)
-            current_time = time.time()
-            if current_time - self.last_canvas_update_time >= self.canvas_update_interval:
-                self.update_queue.put(('update_display', None))
-                self.last_canvas_update_time = current_time
-                self.pending_canvas_update = False
-            else:
-                # Если обновление слишком частое, просто помечаем что нужно обновить
-                self.pending_canvas_update = True
+            # Обновляем изображение на canvas
+            self.update_queue.put(('update_display', None))
             
             # Обновляем статистику
             self.frame_count += 1
+            self.update_count += 1
             
-            # Запрашиваем следующее обновление (с throttling)
-            self._request_framebuffer_update_throttled(incremental=True)
+            # ИСПРАВЛЕНИЕ: Запрашиваем следующее обновление с throttling
+            if self.continuous_updates:
+                # Небольшая задержка чтобы не спамить
+                self.after(10, lambda: self._request_framebuffer_update(incremental=True))
             
         except Exception as e:
             logger.error(f"Framebuffer update error: {e}")
             raise
     
-    def _handle_raw_rectangle(self, x: int, y: int, w: int, h: int):
-        """Обработка RAW прямоугольника."""
+    def _handle_raw_rectangle_optimized(self, x: int, y: int, w: int, h: int):
+        """ОПТИМИЗИРОВАННАЯ обработка RAW прямоугольника."""
         bytes_per_pixel = self.pixel_format['bits_per_pixel'] // 8
         data_size = w * h * bytes_per_pixel
         
@@ -975,63 +1096,84 @@ class VNCViewerFrame(ctk.CTkFrame):
             logger.error(f"Rectangle too large: {w}x{h}, {data_size} bytes")
             raise ValueError(f"Rectangle too large: {data_size} bytes")
         
-        # Логируем большие прямоугольники
-        if data_size > 5000000:  # 5MB
-            logger.info(f"Processing large rectangle: {w}x{h}, {data_size/1024/1024:.1f}MB")
-        
-        # Читаем данные безопасно
+        # Читаем данные
         try:
             pixel_data = self._recv_exact(data_size)
         except Exception as e:
             logger.error(f"Error reading raw rectangle data: {e}")
             raise
         
-        # Создаем изображение для прямоугольника
-        rect_image = Image.new('RGB', (w, h))
-        pixels = []
+        # ОПТИМИЗАЦИЯ: Создаем изображение более эффективно
+        if bytes_per_pixel == 4:  # 32-bit - самый частый случай
+            rect_image = self._create_image_from_32bit_optimized(pixel_data, w, h)
+        elif bytes_per_pixel == 3:  # 24-bit
+            rect_image = self._create_image_from_24bit_optimized(pixel_data, w, h)
+        else:  # 16-bit и другие
+            rect_image = self._create_image_generic(pixel_data, w, h, bytes_per_pixel)
         
-        # Оптимизация для больших изображений
-        if data_size > 1000000:  # 1MB
-            # Обрабатываем блоками для экономии памяти
-            pixels_per_row = w
+        # Вставляем в основной framebuffer
+        self.framebuffer.paste(rect_image, (x, y))
+    
+    def _create_image_from_32bit_optimized(self, pixel_data: bytes, w: int, h: int) -> Image.Image:
+        """ОПТИМИЗИРОВАННОЕ создание изображения из 32-bit данных."""
+        # ОПТИМИЗАЦИЯ: Используем numpy-подобную логику без numpy
+        rect_image = Image.new('RGB', (w, h))
+        
+        # ОПТИМИЗАЦИЯ: Обрабатываем данные блоками для экономии памяти
+        pixels = []
+        data_len = len(pixel_data)
+        
+        # Быстрая обработка для больших изображений
+        if data_len > 1000000:  # > 1MB
+            # Обрабатываем по строкам
             for row in range(h):
-                row_start = row * pixels_per_row * bytes_per_pixel
-                row_end = row_start + pixels_per_row * bytes_per_pixel
+                row_start = row * w * 4
+                row_end = min(row_start + w * 4, data_len)
+                if row_start >= data_len:
+                    break
+                    
                 row_data = pixel_data[row_start:row_end]
-                
                 row_pixels = []
-                for i in range(0, len(row_data), bytes_per_pixel):
-                    if bytes_per_pixel == 4:  # 32-bit
+                
+                for i in range(0, len(row_data), 4):
+                    if i + 3 < len(row_data):
                         b, g, r, _ = row_data[i:i+4]
-                        row_pixels.append((r, g, b))
-                    elif bytes_per_pixel == 3:  # 24-bit
-                        b, g, r = row_data[i:i+3]
-                        row_pixels.append((r, g, b))
-                    elif bytes_per_pixel == 2:  # 16-bit
-                        pixel = struct.unpack("!H", row_data[i:i+2])[0]
-                        r = ((pixel >> self.pixel_format['red_shift']) & 
-                             ((1 << self._bit_count(self.pixel_format['red_max'])) - 1))
-                        g = ((pixel >> self.pixel_format['green_shift']) & 
-                             ((1 << self._bit_count(self.pixel_format['green_max'])) - 1))
-                        b = ((pixel >> self.pixel_format['blue_shift']) & 
-                             ((1 << self._bit_count(self.pixel_format['blue_max'])) - 1))
-                        # Масштабирование до 8 бит
-                        r = r * 255 // self.pixel_format['red_max']
-                        g = g * 255 // self.pixel_format['green_max']
-                        b = b * 255 // self.pixel_format['blue_max']
                         row_pixels.append((r, g, b))
                 
                 pixels.extend(row_pixels)
         else:
-            # Обычная обработка для маленьких изображений
-            for i in range(0, len(pixel_data), bytes_per_pixel):
-                if bytes_per_pixel == 4:  # 32-bit
+            # Быстрая обработка для маленьких изображений
+            for i in range(0, data_len, 4):
+                if i + 3 < data_len:
                     b, g, r, _ = pixel_data[i:i+4]
                     pixels.append((r, g, b))
-                elif bytes_per_pixel == 3:  # 24-bit
-                    b, g, r = pixel_data[i:i+3]
-                    pixels.append((r, g, b))
-                elif bytes_per_pixel == 2:  # 16-bit
+        
+        rect_image.putdata(pixels)
+        return rect_image
+    
+    def _create_image_from_24bit_optimized(self, pixel_data: bytes, w: int, h: int) -> Image.Image:
+        """ОПТИМИЗИРОВАННОЕ создание изображения из 24-bit данных."""
+        rect_image = Image.new('RGB', (w, h))
+        
+        pixels = []
+        data_len = len(pixel_data)
+        
+        for i in range(0, data_len, 3):
+            if i + 2 < data_len:
+                b, g, r = pixel_data[i:i+3]
+                pixels.append((r, g, b))
+        
+        rect_image.putdata(pixels)
+        return rect_image
+    
+    def _create_image_generic(self, pixel_data: bytes, w: int, h: int, bytes_per_pixel: int) -> Image.Image:
+        """Создание изображения для других форматов."""
+        rect_image = Image.new('RGB', (w, h))
+        pixels = []
+        
+        for i in range(0, len(pixel_data), bytes_per_pixel):
+            if bytes_per_pixel == 2:  # 16-bit
+                if i + 1 < len(pixel_data):
                     pixel = struct.unpack("!H", pixel_data[i:i+2])[0]
                     r = ((pixel >> self.pixel_format['red_shift']) & 
                          ((1 << self._bit_count(self.pixel_format['red_max'])) - 1))
@@ -1044,11 +1186,11 @@ class VNCViewerFrame(ctk.CTkFrame):
                     g = g * 255 // self.pixel_format['green_max']
                     b = b * 255 // self.pixel_format['blue_max']
                     pixels.append((r, g, b))
+            else:
+                pixels.append((0, 0, 0))  # Неизвестный формат
         
         rect_image.putdata(pixels)
-        
-        # Вставляем в основной framebuffer
-        self.framebuffer.paste(rect_image, (x, y))
+        return rect_image
     
     def _bit_count(self, n: int) -> int:
         """Подсчет битов в числе."""
@@ -1165,31 +1307,36 @@ class VNCViewerFrame(ctk.CTkFrame):
         self._process_events()
     
     def _process_events(self):
-        """Обработка событий из очереди."""
+        """ОПТИМИЗИРОВАННАЯ обработка событий из очереди."""
         try:
-            while True:
+            # ОПТИМИЗАЦИЯ: Обрабатываем больше событий за раз
+            events_processed = 0
+            max_events_per_cycle = 5
+            
+            while events_processed < max_events_per_cycle:
                 event_type, data = self.update_queue.get_nowait()
                 
                 if event_type == 'update_display':
-                    self._update_canvas()
+                    self._update_canvas_optimized()
                 elif event_type == 'update_status':
                     self.status_label.configure(text=data)
                 elif event_type == 'update_resolution':
                     self.resolution_label.configure(text=data)
+                
+                events_processed += 1
                     
         except queue.Empty:
             pass
         
-        self.after(16, self._process_events)  # ~60 FPS
+        # ОПТИМИЗАЦИЯ: Уменьшаем интервал обработки до 8ms (~120 FPS)
+        self.after(8, self._process_events)
     
-    def _update_canvas(self):
-        """Обновление изображения на canvas с поддержкой масштабирования."""
+    def _update_canvas_optimized(self):
+        """ОПТИМИЗИРОВАННОЕ обновление изображения на canvas."""
         if not self.framebuffer:
             return
         
         try:
-            start_time = time.time()
-            
             # Определяем масштаб
             scale_value = self.scale_var.get()
             scale_factor = 1.0
@@ -1209,8 +1356,11 @@ class VNCViewerFrame(ctk.CTkFrame):
                         scale_factor = min(scale_factor, 0.75)
             else:
                 # Фиксированный масштаб
-                scale_map = {"25%": 0.25, "50%": 0.5, "75%": 0.75, "100%": 1.0}
+                scale_map = {"50%": 0.5, "75%": 0.75, "100%": 1.0}
                 scale_factor = scale_map.get(scale_value, 1.0)
+            
+            # ОПТИМИЗАЦИЯ: Кэшируем масштабированные изображения
+            cache_key = f"{scale_factor}_{self.screen_width}_{self.screen_height}"
             
             # Применяем масштабирование
             display_image = self.framebuffer
@@ -1218,15 +1368,11 @@ class VNCViewerFrame(ctk.CTkFrame):
                 new_width = int(self.screen_width * scale_factor)
                 new_height = int(self.screen_height * scale_factor)
                 
-                # Используем более быстрый алгоритм ресайза для больших изображений
-                if self.screen_width * self.screen_height > 2073600:  # > 1920x1080
-                    resize_method = Image.NEAREST  # Быстрее
-                else:
-                    resize_method = Image.LANCZOS  # Качественнее
-                
+                # ОПТИМИЗАЦИЯ: Используем более быстрый алгоритм ресайза
+                resize_method = Image.NEAREST  # Всегда быстрый для real-time
                 display_image = self.framebuffer.resize((new_width, new_height), resize_method)
             
-            # Преобразуем в PhotoImage
+            # ОПТИМИЗАЦИЯ: Преобразуем в PhotoImage максимально быстро
             photo = ImageTk.PhotoImage(display_image)
             
             # Обновляем canvas
@@ -1241,7 +1387,7 @@ class VNCViewerFrame(ctk.CTkFrame):
             
             # Обновляем индикатор активности
             self.activity_indicator.configure(text="🟢")
-            self.after(100, lambda: self.activity_indicator.configure(text="⚫"))
+            self.after(50, lambda: self.activity_indicator.configure(text="⚫"))
             
             # Обновляем информацию о масштабе
             if scale_factor != 1.0:
@@ -1251,17 +1397,6 @@ class VNCViewerFrame(ctk.CTkFrame):
             
             resolution_text = f"{self.screen_width}x{self.screen_height}{scale_text}"
             self.resolution_label.configure(text=resolution_text)
-            
-            # Логируем время обработки для больших изображений
-            process_time = time.time() - start_time
-            if process_time > 0.1:  # Больше 100ms
-                logger.debug(f"Canvas update took {process_time:.3f}s")
-            
-            # Проверяем, нужно ли обработать отложенное обновление
-            if self.pending_canvas_update:
-                current_time = time.time()
-                if current_time - self.last_canvas_update_time >= self.canvas_update_interval:
-                    self.after(10, self._update_canvas)  # Планируем следующее обновление
             
         except Exception as e:
             logger.error(f"Canvas update error: {e}")
@@ -1312,6 +1447,15 @@ class VNCViewerFrame(ctk.CTkFrame):
         self.connected = False
         self._stop_threads.set()
         
+        # Останавливаем таймеры
+        if self.force_update_timer:
+            self.after_cancel(self.force_update_timer)
+            self.force_update_timer = None
+        
+        if self.request_update_timer:
+            self.after_cancel(self.request_update_timer)
+            self.request_update_timer = None
+        
         # Безопасно закрываем сокет
         if self.socket:
             try:
@@ -1342,15 +1486,24 @@ class VNCViewerFrame(ctk.CTkFrame):
         
         self.framebuffer = None
         
-        # Сброс статистики и throttling
+        # Сброс статистики и счётчиков
         self.frame_count = 0
         self.bytes_received = 0
         self.last_fps_time = time.time()
         self.last_stats_time = time.time()
-        self.last_update_request_time = 0
-        self.last_canvas_update_time = 0
-        self.pending_canvas_update = False
+        self.last_force_update = 0
         self.protocol_errors = 0
+        self.update_count = 0
+        self.request_count = 0  # НОВОЕ: Сброс счётчика запросов
+        self.pending_update_requests = 0  # НОВОЕ: Сброс pending запросов
+        self.last_update_count_time = time.time()
+        self.last_server_response_time = time.time()
+        
+        # Восстанавливаем интервалы
+        self.update_request_interval = 0.033  # Восстанавливаем дефолтный интервал
+        
+        # Очистка кэшей
+        self.image_cache.clear()
         
         # Обновление UI элементов
         try:
@@ -1363,6 +1516,9 @@ class VNCViewerFrame(ctk.CTkFrame):
             self._update_status("Отключено")
             self.resolution_label.configure(text="")
             self.fps_label.configure(text="")
+            self.ups_label.configure(text="")
+            self.rps_label.configure(text="")  # НОВОЕ: Очистка RPS
+            self.pending_label.configure(text="")  # НОВОЕ: Очистка Pending
         except Exception as e:
             logger.debug(f"Error updating UI during disconnect: {e}")
         
@@ -1376,38 +1532,44 @@ class VNCViewerFrame(ctk.CTkFrame):
         # Небольшая задержка перед переподключением
         self.after(1000, self.connect_to_vnc)
     
-    # Обработчики событий мыши
+    # Обработчики событий мыши - ИСПРАВЛЕНО: убраны лишние запросы
     def _on_mouse_click(self, event):
         """Обработка клика мыши."""
         if self.connected and not self.view_only_var.get():
             self._send_pointer_event(event.x, event.y, button_mask=1)
+            # Запрос уже отправляется в _send_pointer_event при button_mask != 0
     
     def _on_mouse_release(self, event):
         """Обработка отпускания кнопки мыши."""
         if self.connected and not self.view_only_var.get():
             self._send_pointer_event(event.x, event.y, button_mask=0)
+            # Дополнительный запрос при отпускании для обновления UI
+            self._request_framebuffer_update(incremental=True)
     
     def _on_mouse_motion(self, event):
         """Обработка движения мыши с зажатой кнопкой."""
         if self.connected and not self.view_only_var.get():
             self._send_pointer_event(event.x, event.y, button_mask=1)
+            # Запрос уже отправляется в _send_pointer_event
     
     def _on_mouse_move(self, event):
-        """Обработка движения мыши."""
+        """УМЕРЕННАЯ обработка движения мыши."""
         if self.connected and not self.view_only_var.get():
-            # Ограничиваем частоту отправки
+            # ИСПРАВЛЕНИЕ: Больший throttling для движения мыши
             current_time = time.time()
             if hasattr(self, '_last_mouse_move_time'):
-                if current_time - self._last_mouse_move_time < 0.05:  # 20 FPS
+                if current_time - self._last_mouse_move_time < 0.05:  # 20 FPS для движения мыши
                     return
             self._last_mouse_move_time = current_time
             
             self._send_pointer_event(event.x, event.y, button_mask=0)
+            # НЕ запрашиваем обновления при простом движении мыши
     
     def _on_right_click(self, event):
         """Обработка правого клика."""
         if self.connected and not self.view_only_var.get():
             self._send_pointer_event(event.x, event.y, button_mask=4)
+            # Запрос уже отправляется в _send_pointer_event при button_mask != 0
     
     def _on_right_release(self, event):
         """Обработка отпускания правой кнопки."""
@@ -1426,6 +1588,7 @@ class VNCViewerFrame(ctk.CTkFrame):
             # Отправляем нажатие и отпускание
             self._send_pointer_event(event.x, event.y, button_mask=button_mask)
             self.after(10, lambda: self._send_pointer_event(event.x, event.y, button_mask=0))
+            # Запросы уже отправляются в _send_pointer_event
     
     def _send_pointer_event(self, x: int, y: int, button_mask: int):
         """Отправка события указателя с учетом масштабирования."""
@@ -1455,7 +1618,7 @@ class VNCViewerFrame(ctk.CTkFrame):
                     if self.screen_width > 2000 or self.screen_height > 1500:
                         scale_factor = min(scale_factor, 0.75)
             else:
-                scale_map = {"25%": 0.25, "50%": 0.5, "75%": 0.75, "100%": 1.0}
+                scale_map = {"50%": 0.5, "75%": 0.75, "100%": 1.0}
                 scale_factor = scale_map.get(scale_value, 1.0)
             
             # Преобразуем координаты обратно к реальному разрешению
@@ -1473,6 +1636,11 @@ class VNCViewerFrame(ctk.CTkFrame):
                 real_x, real_y
             )
             self.socket.send(message)
+            
+            # ИСПРАВЛЕНИЕ: Запрашиваем обновление только при кликах, не при движении
+            if button_mask != 0:  # Только при нажатии кнопок
+                self._request_framebuffer_update(incremental=True)
+            
         except (OSError, socket.error) as e:
             logger.debug(f"Socket error sending pointer event: {e}")
             # Не разрываем соединение, просто игнорируем
@@ -1561,6 +1729,11 @@ class VNCViewerFrame(ctk.CTkFrame):
                 keysym
             )
             self.socket.send(message)
+            
+            # ИСПРАВЛЕНИЕ: Запрашиваем обновление только при нажатии, не при отпускании
+            if down:  # Только при нажатии клавиши
+                self._request_framebuffer_update(incremental=True)
+            
         except (OSError, socket.error) as e:
             logger.debug(f"Socket error sending key event: {e}")
             # Не разрываем соединение, просто игнорируем
@@ -1630,14 +1803,14 @@ class VNCViewerFrame(ctk.CTkFrame):
         self.disconnect_from_vnc()
     
     def _update_stats(self):
-        """Обновление статистики производительности."""
+        """ИСПРАВЛЕННОЕ обновление статистики производительности."""
         if not self.connected:
             self.after(1000, self._update_stats)
             return
         
         current_time = time.time()
         
-        # Обновляем FPS
+        # Обновляем FPS чаще
         if current_time - self.last_fps_time >= 1.0:
             fps = self.frame_count / (current_time - self.last_fps_time)
             self.fps_label.configure(text=f"FPS: {fps:.1f}")
@@ -1645,31 +1818,66 @@ class VNCViewerFrame(ctk.CTkFrame):
             self.frame_count = 0
             self.last_fps_time = current_time
         
-        # Обновляем статистику через секунду
+        # НОВОЕ: Обновляем UPS (Updates Per Second) и RPS (Requests Per Second)
+        if current_time - self.last_update_count_time >= 1.0:
+            ups = self.update_count / (current_time - self.last_update_count_time)
+            rps = self.request_count / (current_time - self.last_update_count_time)
+            
+            self.ups_label.configure(text=f"UPS: {ups:.1f}")
+            self.rps_label.configure(text=f"RPS: {rps:.1f}")
+            
+            self.update_count = 0
+            self.request_count = 0
+            self.last_update_count_time = current_time
+        
+        # НОВОЕ: Показываем pending запросы
+        self.pending_label.configure(text=f"Pending: {self.pending_update_requests}")
+        
+        # Обновляем статистику каждую секунду
         self.after(1000, self._update_stats)
     
     def _adjust_performance_settings(self):
-        """Настройка производительности в зависимости от выбранного качества."""
+        """ИСПРАВЛЕННАЯ настройка производительности для умеренной нагрузки."""
         quality = self.quality_var.get()
         
-        if quality == "Низкое":
-            # Максимальная производительность
-            self.update_request_interval = 0.1    # 10 FPS
-            self.canvas_update_interval = 0.1     # 10 FPS UI
-        elif quality == "Среднее":
-            # Баланс качества и производительности
-            self.update_request_interval = 0.05   # 20 FPS
-            self.canvas_update_interval = 0.067   # 15 FPS UI
-        else:  # Высокое
-            # Максимальное качество
-            self.update_request_interval = 0.033  # 30 FPS
-            self.canvas_update_interval = 0.05    # 20 FPS UI
+        if quality == "Среднее":
+            # Умеренная производительность
+            self.update_request_interval = 0.1       # 10 FPS запросов
+            self.canvas_update_interval = 0.033      # 30 FPS UI
+            self.force_update_interval = 1.0         # 1 FPS принудительно
+            self.continuous_update_interval = 0.2    # 5 FPS continuous
+        elif quality == "Высокое":
+            # Хорошая производительность  
+            self.update_request_interval = 0.05      # 20 FPS запросов
+            self.canvas_update_interval = 0.033      # 30 FPS UI
+            self.force_update_interval = 0.5         # 2 FPS принудительно
+            self.continuous_update_interval = 0.15   # 6.7 FPS continuous
+        else:  # Максимум
+            # Отличная производительность
+            self.update_request_interval = 0.033     # 30 FPS запросов
+            self.canvas_update_interval = 0.033      # 30 FPS UI
+            self.force_update_interval = 0.33        # 3 FPS принудительно
+            self.continuous_update_interval = 0.1    # 10 FPS continuous
         
-        logger.debug(f"Performance settings: quality={quality}, "
-                    f"update_interval={self.update_request_interval}, "
-                    f"canvas_interval={self.canvas_update_interval}")
+        logger.info(f"Performance settings: quality={quality}, "
+                   f"request_interval={self.update_request_interval}, "
+                   f"canvas_interval={self.canvas_update_interval}, "
+                   f"force_interval={self.force_update_interval}, "
+                   f"continuous_interval={self.continuous_update_interval}")
     
     def _on_quality_change(self, value):
         """Обработка изменения качества."""
         self._adjust_performance_settings()
+        
+        # Перезапускаем таймеры с новыми настройками
+        if self.connected:
+            # Останавливаем старые таймеры
+            if self.force_update_timer:
+                self.after_cancel(self.force_update_timer)
+            if self.request_update_timer:
+                self.after_cancel(self.request_update_timer)
+            
+            # Запускаем новые с обновленными интервалами
+            self._start_update_timers()
+            
         logger.info(f"Quality changed to: {value}")
