@@ -1,4 +1,4 @@
-# gui/vnc_viewer_frame.py
+# gui/vnc_viewer_frame.py - ИСПРАВЛЕННАЯ ВЕРСИЯ ОРИГИНАЛЬНОГО КОДА
 import customtkinter as ctk
 from tkinter import Canvas, messagebox
 import socket
@@ -89,36 +89,36 @@ class VNCViewerFrame(ctk.CTkFrame):
         
         # ИСПРАВЛЕНИЕ: Разумный throttling для умеренной нагрузки
         self.last_update_request_time = 0
-        self.update_request_interval = 0.033  # 30 FPS максимум запросов
+        self.update_request_interval = 0.05  # 20 FPS максимум запросов
         self.last_canvas_update_time = 0
         self.canvas_update_interval = 0.033   # 30 FPS для UI
         self.pending_canvas_update = False
         
-        # НОВОЕ: Контроль pending запросов
+        # ИСПРАВЛЕНИЕ: Контроль pending запросов
         self.pending_update_requests = 0
-        self.max_pending_requests = 3  # Максимум 3 pending запроса
+        self.max_pending_requests = 2  # УМЕНЬШЕНО до 2
         self.last_server_response_time = time.time()
-        self.server_response_timeout = 2.0  # 2 секунды без ответа = проблема
+        self.server_response_timeout = 3.0  # 3 секунды без ответа = проблема
         
         # ИСПРАВЛЕНИЕ: Умеренные принудительные обновления
         self.force_update_timer = None
-        self.force_update_interval = 0.5      # 2 FPS принудительно
+        self.force_update_interval = 1.0      # 1 FPS принудительно
         self.last_force_update = 0
         
         # ИСПРАВЛЕНИЕ: Умеренная стратегия обновлений
         self.request_update_timer = None
         self.continuous_updates = False  # ИСПРАВЛЕНИЕ: По умолчанию выключены
-        self.continuous_update_interval = 0.1  # 10 FPS для continuous
+        self.continuous_update_interval = 0.2  # 5 FPS для continuous
         
         # Оптимизация обработки изображений
         self.image_processing_queue = queue.Queue(maxsize=2)
         self.last_image_data = None
         self.image_cache = {}
-        self.max_cache_size = 5  # Уменьшили размер кэша
+        self.max_cache_size = 3  # Уменьшили размер кэша
         
         # Детекция проблем протокола
         self.protocol_errors = 0
-        self.max_protocol_errors = 5
+        self.max_protocol_errors = 10  # УВЕЛИЧЕНО для UltraVNC
         
         # Счётчики для отладки производительности
         self.updates_per_second = 0
@@ -333,6 +333,14 @@ class VNCViewerFrame(ctk.CTkFrame):
         )
         self.fps_label.pack(side="left", padx=20)
         
+        # ИСПРАВЛЕНИЕ: Добавляем недостающий ups_label
+        self.ups_label = ctk.CTkLabel(
+            status_frame,
+            text="",
+            font=ctk.CTkFont(size=12)
+        )
+        self.ups_label.pack(side="left", padx=20)
+        
         # НОВОЕ: Показываем RPS (Requests Per Second) и Pending
         self.rps_label = ctk.CTkLabel(
             status_frame,
@@ -410,12 +418,14 @@ class VNCViewerFrame(ctk.CTkFrame):
         self._schedule_continuous_update()
     
     def _schedule_force_update(self):
-        """Планирование принудительного обновления."""
+        """ИСПРАВЛЕННОЕ планирование принудительного обновления."""
         if not self.connected:
             return
             
         current_time = time.time()
-        if current_time - self.last_force_update >= self.force_update_interval:
+        # ИСПРАВЛЕНО: Учитываем pending запросы для force update
+        if (current_time - self.last_force_update >= self.force_update_interval and 
+            self.pending_update_requests < self.max_pending_requests):
             self._request_framebuffer_update(incremental=False)
             self.last_force_update = current_time
         
@@ -424,14 +434,16 @@ class VNCViewerFrame(ctk.CTkFrame):
             self.force_update_timer = self.after(int(self.force_update_interval * 1000), self._schedule_force_update)
     
     def _schedule_continuous_update(self):
-        """Планирование непрерывных обновлений."""
+        """ИСПРАВЛЕННОЕ планирование непрерывных обновлений."""
         if not self.connected:
             return
             
-        if self.continuous_var.get():
+        # ИСПРАВЛЕНО: Проверяем pending запросы перед continuous update
+        if (self.continuous_var.get() and 
+            self.pending_update_requests < self.max_pending_requests):
             self._request_framebuffer_update(incremental=True)
         
-        # ИСПРАВЛЕНИЕ: Разумная частота вместо 5ms
+        # ИСПРАВЛЕНИЕ: Разумная частота
         if self.connected:
             self.request_update_timer = self.after(int(self.continuous_update_interval * 1000), self._schedule_continuous_update)
     
@@ -467,7 +479,7 @@ class VNCViewerFrame(ctk.CTkFrame):
         ).start()
     
     def _connect_thread(self, host: str, port: int, password: str):
-        """Поток подключения к VNC серверу."""
+        """ИСПРАВЛЕННЫЙ поток подключения к VNC серверу."""
         try:
             self._update_status("Подключение...")
             
@@ -494,6 +506,12 @@ class VNCViewerFrame(ctk.CTkFrame):
             self.connected = True
             self._update_status(f"Подключено к {host}:{port}")
             
+            # ИСПРАВЛЕНО: Полный сброс всех счетчиков при новом подключении
+            self.pending_update_requests = 0
+            self.last_server_response_time = time.time()
+            self.last_update_request_time = 0
+            self.protocol_errors = 0
+            
             # Обновление UI
             self.after(0, self._on_connected)
             
@@ -503,9 +521,9 @@ class VNCViewerFrame(ctk.CTkFrame):
             # ИСПРАВЛЕНИЕ: Запускаем таймеры ПОСЛЕ установки connected=True
             self.after(0, self._start_update_timers)
             
-            # ИСПРАВЛЕНИЕ: Умеренное начальное обновление
-            self._request_framebuffer_update(incremental=False)
-            self.after(100, lambda: self._request_framebuffer_update(incremental=True))
+            # ИСПРАВЛЕНИЕ: Более осторожное начальное обновление
+            self.after(100, lambda: self._request_framebuffer_update(incremental=False))
+            self.after(300, lambda: self._request_framebuffer_update(incremental=True))
             
         except Exception as e:
             logger.error(f"Ошибка подключения: {e}")
@@ -820,27 +838,26 @@ class VNCViewerFrame(ctk.CTkFrame):
     
     # ИСПРАВЛЕНИЕ: Разумный throttling для запросов
     def _request_framebuffer_update(self, incremental: bool = True):
-        """Запрос обновления framebuffer с разумным throttling."""
+        """ИСПРАВЛЕННЫЙ запрос обновления framebuffer."""
         if not self.connected or not self.socket:
             return
         
         current_time = time.time()
         
-        # НОВОЕ: Проверяем throttling
+        # ИСПРАВЛЕНО: Более жесткий throttling
         if current_time - self.last_update_request_time < self.update_request_interval:
             return
         
-        # НОВОЕ: Проверяем количество pending запросов
+        # ИСПРАВЛЕНО: Строгий контроль pending запросов
         if self.pending_update_requests >= self.max_pending_requests:
-            logger.debug(f"Too many pending requests: {self.pending_update_requests}")
-            return
-        
-        # НОВОЕ: Проверяем отвечает ли сервер
-        time_since_response = current_time - self.last_server_response_time
-        if time_since_response > self.server_response_timeout:
-            logger.warning(f"Server not responding for {time_since_response:.1f}s, reducing requests")
-            # Увеличиваем интервал если сервер не отвечает
-            self.update_request_interval = min(self.update_request_interval * 1.5, 1.0)
+            # НОВОЕ: Форсированный сброс если слишком долго pending
+            time_since_response = current_time - self.last_server_response_time
+            if time_since_response > 2.0:  # 2 секунды без ответа
+                logger.warning(f"Force resetting pending requests after {time_since_response:.1f}s timeout")
+                self.pending_update_requests = 0
+            else:
+                logger.debug(f"Too many pending requests: {self.pending_update_requests}")
+                return
         
         try:
             # Проверяем валидность сокета
@@ -850,10 +867,10 @@ class VNCViewerFrame(ctk.CTkFrame):
             
             message = struct.pack(
                 "!BBHHHH",
-                self.FRAMEBUFFER_UPDATE_REQUEST,  # 3
+                self.FRAMEBUFFER_UPDATE_REQUEST,
                 1 if incremental else 0,
-                0, 0,  # x, y
-                self.screen_width, self.screen_height  # width, height
+                0, 0,
+                self.screen_width, self.screen_height
             )
             
             self.socket.send(message)
@@ -863,15 +880,19 @@ class VNCViewerFrame(ctk.CTkFrame):
             self.last_update_request_time = current_time
             self.request_count += 1
             
-            # УМЕНЬШЕНО: Логирование только каждого 10-го запроса
-            if self.request_count % 10 == 0:
+            # УМЕНЬШЕНО: Логирование только каждого 20-го запроса
+            if self.request_count % 20 == 0:
                 request_type = "incremental" if incremental else "full"
                 logger.debug(f"Sent framebuffer update request #{self.request_count}: {request_type}, pending: {self.pending_update_requests}")
             
         except (OSError, socket.error) as e:
             logger.debug(f"Socket error requesting framebuffer update: {e}")
+            # При ошибке сокета - сбрасываем pending
+            self.pending_update_requests = 0
         except Exception as e:
             logger.error(f"Error requesting framebuffer update: {e}")
+            # При ошибке сокета - сбрасываем pending
+            self.pending_update_requests = 0
     
     def _start_receiver_thread(self):
         """Запуск потока приёма данных."""
@@ -887,13 +908,24 @@ class VNCViewerFrame(ctk.CTkFrame):
         logger.info("Receiver thread started")
     
     def _receive_loop(self):
-        """Цикл приёма данных от сервера."""
+        """ИСПРАВЛЕННЫЙ цикл приёма данных от сервера."""
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        
         while self.connected and not self._stop_threads.is_set():
             try:
                 # Проверяем валидность сокета
                 if not self.socket or self.socket.fileno() == -1:
                     logger.warning("Socket is closed or invalid")
                     break
+                
+                # ИСПРАВЛЕНО: Периодически проверяем pending запросы
+                current_time = time.time()
+                if (self.pending_update_requests > 0 and 
+                    current_time - self.last_server_response_time > 3.0):
+                    logger.warning("No server response for 3+ seconds, resetting pending requests")
+                    self.pending_update_requests = 0
+                    self.last_server_response_time = current_time
                 
                 # Читаем тип сообщения с проверкой
                 msg_type_data = self.socket.recv(1)
@@ -909,13 +941,21 @@ class VNCViewerFrame(ctk.CTkFrame):
                         self._handle_framebuffer_update()
                         # Сбрасываем счетчик ошибок при успешной обработке
                         self.protocol_errors = 0
+                        consecutive_errors = 0
                     except Exception as e:
                         self.protocol_errors += 1
+                        consecutive_errors += 1
                         logger.error(f"Framebuffer update error #{self.protocol_errors}: {e}")
                         
                         if self.protocol_errors >= self.max_protocol_errors:
                             logger.error("Too many protocol errors, disconnecting")
                             raise ConnectionError(f"Protocol error limit exceeded: {self.protocol_errors}")
+                        
+                        # При ошибках сбрасываем pending запросы
+                        if consecutive_errors >= 3:
+                            logger.warning("Multiple consecutive errors, resetting pending requests")
+                            self.pending_update_requests = 0
+                            consecutive_errors = 0
                         
                         # Пытаемся восстановиться
                         time.sleep(0.1)
@@ -927,35 +967,19 @@ class VNCViewerFrame(ctk.CTkFrame):
                 elif message_type == self.SERVER_CUT_TEXT:
                     self._handle_server_cut_text()
                 else:
-                    logger.warning(f"Unknown message type: {message_type}")
-                    # Простая обработка неизвестных сообщений
-                    try:
-                        # Для большинства неизвестных типов просто игнорируем
-                        if message_type in [255, 33, 45, 36]:  # Известные UltraVNC расширения
-                            logger.debug(f"Ignoring UltraVNC extension message type {message_type}")
-                            continue  # Просто игнорируем эти сообщения
-                        else:
-                            logger.warning(f"Unknown message type {message_type}, attempting to skip")
-                            # Пытаемся прочитать несколько байт и продолжить
-                            try:
-                                if hasattr(socket, 'MSG_DONTWAIT'):
-                                    skip_data = self.socket.recv(16, socket.MSG_DONTWAIT)
-                                else:
-                                    # Для Windows используем неблокирующий режим
-                                    self.socket.setblocking(False)
-                                    try:
-                                        skip_data = self.socket.recv(16)
-                                    finally:
-                                        self.socket.setblocking(True)
-                                logger.debug(f"Skipped {len(skip_data)} bytes for unknown message {message_type}")
-                            except (socket.error, BlockingIOError):
-                                # Нет данных для чтения - это нормально
-                                logger.debug(f"No data to skip for message type {message_type}")
-                    except Exception as e:
-                        logger.error(f"Error handling unknown message {message_type}: {e}")
-                        # Продолжаем работу даже при ошибках
-                        time.sleep(0.01)
-                
+                    # ИСПРАВЛЕНИЕ: Улучшенная обработка неизвестных сообщений UltraVNC
+                    logger.debug(f"Unknown message type: {message_type}")
+                    
+                    # Известные UltraVNC расширения - просто игнорируем
+                    if message_type in [255, 33, 45, 36, 127, 253, 254]:
+                        logger.debug(f"Ignoring UltraVNC extension message type {message_type}")
+                        # НЕ читаем дополнительные данные - просто продолжаем
+                        continue
+                    else:
+                        logger.warning(f"Truly unknown message type {message_type}")
+                        # Для действительно неизвестных типов - пытаемся продолжить
+                        continue
+            
             except socket.timeout:
                 # Таймаут - это нормально, продолжаем
                 continue
@@ -970,10 +994,20 @@ class VNCViewerFrame(ctk.CTkFrame):
                 break
             except struct.error as e:
                 logger.error(f"Struct unpack error: {e}")
-                break
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    break
+                # При struct ошибках сбрасываем pending
+                self.pending_update_requests = 0
+                time.sleep(0.1)
+                continue
             except Exception as e:
                 logger.error(f"Receive error: {e}", exc_info=True)
-                # Для других ошибок пытаемся продолжить
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    break
+                # При общих ошибках тоже сбрасываем pending
+                self.pending_update_requests = 0
                 time.sleep(0.1)
                 continue
         
@@ -1028,14 +1062,15 @@ class VNCViewerFrame(ctk.CTkFrame):
         try:
             current_time = time.time()
             
-            # НОВОЕ: Сервер ответил, обновляем статистику
+            # ИСПРАВЛЕНО: Сервер ответил, ВСЕГДА уменьшаем pending запросы
+            if self.pending_update_requests > 0:
+                self.pending_update_requests -= 1
             self.last_server_response_time = current_time
-            self.pending_update_requests = max(0, self.pending_update_requests - 1)
             
             # НОВОЕ: Восстанавливаем нормальный интервал если сервер отвечает
-            if self.update_request_interval > 0.033:
-                self.update_request_interval *= 0.9  # Постепенно уменьшаем
-                self.update_request_interval = max(self.update_request_interval, 0.033)
+            if self.update_request_interval > 0.05:
+                self.update_request_interval *= 0.9
+                self.update_request_interval = max(self.update_request_interval, 0.05)
             
             # Пропускаем padding
             self._recv_exact(1)
@@ -1047,43 +1082,55 @@ class VNCViewerFrame(ctk.CTkFrame):
             if num_rectangles > 1:
                 logger.debug(f"Processing {num_rectangles} rectangles")
             
+            rectangles_processed = 0
             for _ in range(num_rectangles):
-                # Координаты и размеры
-                rect_data = self._recv_exact(8)
-                x, y, w, h = struct.unpack("!HHHH", rect_data)
+                try:
+                    # Координаты и размеры
+                    rect_data = self._recv_exact(8)
+                    x, y, w, h = struct.unpack("!HHHH", rect_data)
+                    
+                    # Тип кодировки
+                    encoding = struct.unpack("!i", self._recv_exact(4))[0]
+                    
+                    # Обработка в зависимости от кодировки
+                    if encoding == self.ENCODING_RAW:
+                        self._handle_raw_rectangle_optimized(x, y, w, h)
+                        rectangles_processed += 1
+                    elif encoding == self.ENCODING_COPYRECT:
+                        self._handle_copyrect(x, y, w, h)
+                        rectangles_processed += 1
+                    elif encoding == self.ENCODING_RRE:
+                        self._handle_rre_rectangle(x, y, w, h)
+                        rectangles_processed += 1
+                    else:
+                        logger.warning(f"Unsupported encoding: {encoding}")
+                        # Пропускаем данные
+                        bytes_per_pixel = self.pixel_format['bits_per_pixel'] // 8
+                        skip_size = w * h * bytes_per_pixel
+                        if skip_size > 0:
+                            self._recv_exact(skip_size)
+                except Exception as e:
+                    logger.error(f"Error processing rectangle: {e}")
+                    continue
+            
+            # Обновляем изображение на canvas только если обработали прямоугольники
+            if rectangles_processed > 0:
+                self.update_queue.put(('update_display', None))
                 
-                # Тип кодировки
-                encoding = struct.unpack("!i", self._recv_exact(4))[0]
-                
-                # Обработка в зависимости от кодировки
-                if encoding == self.ENCODING_RAW:
-                    self._handle_raw_rectangle_optimized(x, y, w, h)
-                elif encoding == self.ENCODING_COPYRECT:
-                    self._handle_copyrect(x, y, w, h)
-                elif encoding == self.ENCODING_RRE:
-                    self._handle_rre_rectangle(x, y, w, h)
-                else:
-                    logger.warning(f"Unsupported encoding: {encoding}")
-                    # Пропускаем данные
-                    bytes_per_pixel = self.pixel_format['bits_per_pixel'] // 8
-                    skip_size = w * h * bytes_per_pixel
-                    if skip_size > 0:
-                        self._recv_exact(skip_size)
+                # Обновляем статистику
+                self.frame_count += 1
+                self.update_count += 1
             
-            # Обновляем изображение на canvas
-            self.update_queue.put(('update_display', None))
-            
-            # Обновляем статистику
-            self.frame_count += 1
-            self.update_count += 1
-            
-            # ИСПРАВЛЕНИЕ: Запрашиваем следующее обновление с throttling
-            if self.continuous_updates:
-                # Небольшая задержка чтобы не спамить
-                self.after(10, lambda: self._request_framebuffer_update(incremental=True))
+            # ИСПРАВЛЕНИЕ: Более разумная стратегия запросов
+            if self.continuous_updates and self.pending_update_requests < self.max_pending_requests:
+                # Запрашиваем новое обновление только если есть "место"
+                self.after(20, lambda: self._request_framebuffer_update(incremental=True))
             
         except Exception as e:
             logger.error(f"Framebuffer update error: {e}")
+            # ИСПРАВЛЕНО: При ошибке тоже уменьшаем pending
+            if self.pending_update_requests > 0:
+                self.pending_update_requests -= 1
             raise
     
     def _handle_raw_rectangle_optimized(self, x: int, y: int, w: int, h: int):
@@ -1440,7 +1487,7 @@ class VNCViewerFrame(ctk.CTkFrame):
         messagebox.showerror("Ошибка подключения", error_message)
     
     def disconnect_from_vnc(self):
-        """Отключение от VNC сервера."""
+        """ИСПРАВЛЕННОЕ отключение от VNC сервера."""
         logger.info("Disconnecting from VNC server...")
         
         # Останавливаем флаг подключения
@@ -1456,27 +1503,31 @@ class VNCViewerFrame(ctk.CTkFrame):
             self.after_cancel(self.request_update_timer)
             self.request_update_timer = None
         
-        # Безопасно закрываем сокет
+        # ИСПРАВЛЕНО: Более агрессивное закрытие сокета
         if self.socket:
             try:
                 # Проверяем, что сокет ещё валидный
                 if self.socket.fileno() != -1:
-                    self.socket.shutdown(socket.SHUT_RDWR)
-                self.socket.close()
+                    # Устанавливаем короткий таймаут для быстрого закрытия
+                    self.socket.settimeout(0.1)
+                    try:
+                        self.socket.shutdown(socket.SHUT_RDWR)
+                    except:
+                        pass  # Игнорируем ошибки shutdown
+                    self.socket.close()
                 logger.debug("Socket closed successfully")
-            except (OSError, socket.error) as e:
-                logger.debug(f"Socket already closed or error during close: {e}")
             except Exception as e:
-                logger.warning(f"Unexpected error closing socket: {e}")
+                logger.debug(f"Socket close error (expected): {e}")
             finally:
                 self.socket = None
         
-        # Ждем завершения потоков
+        # ИСПРАВЛЕНО: Более агрессивное завершение потоков
         if self.receiving_thread and self.receiving_thread.is_alive():
             logger.debug("Waiting for receiver thread to finish...")
-            self.receiving_thread.join(timeout=2)  # Увеличили таймаут
+            self.receiving_thread.join(timeout=1)  # УМЕНЬШИЛИ таймаут до 1 сек
             if self.receiving_thread.is_alive():
-                logger.warning("Receiver thread did not finish in time")
+                logger.warning("Receiver thread still alive, forcing cleanup")
+                # Поток зависнет, но мы продолжим
         
         # Очистка UI
         try:
@@ -1486,7 +1537,7 @@ class VNCViewerFrame(ctk.CTkFrame):
         
         self.framebuffer = None
         
-        # Сброс статистики и счётчиков
+        # ИСПРАВЛЕНО: Полный сброс всех счётчиков
         self.frame_count = 0
         self.bytes_received = 0
         self.last_fps_time = time.time()
@@ -1494,13 +1545,14 @@ class VNCViewerFrame(ctk.CTkFrame):
         self.last_force_update = 0
         self.protocol_errors = 0
         self.update_count = 0
-        self.request_count = 0  # НОВОЕ: Сброс счётчика запросов
-        self.pending_update_requests = 0  # НОВОЕ: Сброс pending запросов
+        self.request_count = 0
+        self.pending_update_requests = 0  # КРИТИЧНО: Полный сброс pending
         self.last_update_count_time = time.time()
         self.last_server_response_time = time.time()
+        self.last_update_request_time = 0  # ДОБАВЛЕНО: Сброс последнего запроса
         
         # Восстанавливаем интервалы
-        self.update_request_interval = 0.033  # Восстанавливаем дефолтный интервал
+        self.update_request_interval = 0.05
         
         # Очистка кэшей
         self.image_cache.clear()
@@ -1517,8 +1569,8 @@ class VNCViewerFrame(ctk.CTkFrame):
             self.resolution_label.configure(text="")
             self.fps_label.configure(text="")
             self.ups_label.configure(text="")
-            self.rps_label.configure(text="")  # НОВОЕ: Очистка RPS
-            self.pending_label.configure(text="")  # НОВОЕ: Очистка Pending
+            self.rps_label.configure(text="")
+            self.pending_label.configure(text="")
         except Exception as e:
             logger.debug(f"Error updating UI during disconnect: {e}")
         
@@ -1830,54 +1882,90 @@ class VNCViewerFrame(ctk.CTkFrame):
             self.request_count = 0
             self.last_update_count_time = current_time
         
-        # НОВОЕ: Показываем pending запросы
-        self.pending_label.configure(text=f"Pending: {self.pending_update_requests}")
+        # ИСПРАВЛЕНО: Улучшенное отображение pending запросов с цветовым кодированием
+        pending_text = f"Pending: {self.pending_update_requests}"
+        if self.pending_update_requests >= self.max_pending_requests:
+            pending_text += " ⚠️"  # Предупреждение если на максимуме
+        elif self.pending_update_requests == 0:
+            pending_text += " ✓"   # Галочка если нет pending
+        
+        self.pending_label.configure(text=pending_text)
+        
+        # НОВОЕ: Диагностика зависших pending запросов
+        time_since_response = current_time - self.last_server_response_time
+        if self.pending_update_requests > 0 and time_since_response > 2.0:
+            logger.debug(f"Potential stuck pending requests: {self.pending_update_requests}, "
+                        f"last response {time_since_response:.1f}s ago")
         
         # Обновляем статистику каждую секунду
         self.after(1000, self._update_stats)
     
     def _adjust_performance_settings(self):
-        """ИСПРАВЛЕННАЯ настройка производительности для умеренной нагрузки."""
+        """ИСПРАВЛЕННАЯ настройка производительности для сниженных задержек."""
         quality = self.quality_var.get()
         
         if quality == "Среднее":
-            # Умеренная производительность
-            self.update_request_interval = 0.1       # 10 FPS запросов
+            # Сбалансированная производительность
+            self.update_request_interval = 0.08      # 12.5 FPS запросов (было 0.1)
             self.canvas_update_interval = 0.033      # 30 FPS UI
-            self.force_update_interval = 1.0         # 1 FPS принудительно
-            self.continuous_update_interval = 0.2    # 5 FPS continuous
+            self.force_update_interval = 0.8         # 1.25 FPS принудительно (было 1.0)
+            self.continuous_update_interval = 0.15   # 6.7 FPS continuous (было 0.2)
+            self.max_pending_requests = 2            # Максимум 2 pending
         elif quality == "Высокое":
-            # Хорошая производительность  
-            self.update_request_interval = 0.05      # 20 FPS запросов
+            # Хорошая производительность
+            self.update_request_interval = 0.06      # 16.7 FPS запросов (было 0.05)
             self.canvas_update_interval = 0.033      # 30 FPS UI
-            self.force_update_interval = 0.5         # 2 FPS принудительно
-            self.continuous_update_interval = 0.15   # 6.7 FPS continuous
+            self.force_update_interval = 0.6         # 1.7 FPS принудительно (было 0.5)
+            self.continuous_update_interval = 0.12   # 8.3 FPS continuous (было 0.15)
+            self.max_pending_requests = 2            # Максимум 2 pending
         else:  # Максимум
-            # Отличная производительность
-            self.update_request_interval = 0.033     # 30 FPS запросов
+            # Максимальная производительность
+            self.update_request_interval = 0.05      # 20 FPS запросов (было 0.04)
             self.canvas_update_interval = 0.033      # 30 FPS UI
-            self.force_update_interval = 0.33        # 3 FPS принудительно
-            self.continuous_update_interval = 0.1    # 10 FPS continuous
+            self.force_update_interval = 0.4         # 2.5 FPS принудительно (было 0.33)
+            self.continuous_update_interval = 0.08   # 12.5 FPS continuous (было 0.1)
+            self.max_pending_requests = 3            # Максимум 3 pending для высокого качества
         
         logger.info(f"Performance settings: quality={quality}, "
                    f"request_interval={self.update_request_interval}, "
-                   f"canvas_interval={self.canvas_update_interval}, "
+                   f"max_pending={self.max_pending_requests}, "
                    f"force_interval={self.force_update_interval}, "
                    f"continuous_interval={self.continuous_update_interval}")
     
     def _on_quality_change(self, value):
-        """Обработка изменения качества."""
+        """ИСПРАВЛЕННАЯ обработка изменения качества."""
+        logger.info(f"Quality changing from current settings to: {value}")
+        
+        # Сохраняем старые настройки для сравнения
+        old_interval = self.update_request_interval
+        old_max_pending = self.max_pending_requests
+        
+        # Применяем новые настройки
         self._adjust_performance_settings()
         
         # Перезапускаем таймеры с новыми настройками
         if self.connected:
+            logger.info("Restarting timers with new quality settings")
+            
             # Останавливаем старые таймеры
             if self.force_update_timer:
                 self.after_cancel(self.force_update_timer)
+                self.force_update_timer = None
             if self.request_update_timer:
                 self.after_cancel(self.request_update_timer)
+                self.request_update_timer = None
+            
+            # ИСПРАВЛЕНО: Сбрасываем pending при смене качества
+            if old_max_pending != self.max_pending_requests:
+                logger.info(f"Resetting pending requests due to max_pending change: {old_max_pending} -> {self.max_pending_requests}")
+                self.pending_update_requests = 0
             
             # Запускаем новые с обновленными интервалами
-            self._start_update_timers()
+            self.after(100, self._start_update_timers)
             
-        logger.info(f"Quality changed to: {value}")
+        logger.info(f"Quality changed: interval {old_interval:.3f}s -> {self.update_request_interval:.3f}s, "
+                   f"max_pending {old_max_pending} -> {self.max_pending_requests}")
+        
+        # НОВОЕ: Немедленный запрос обновления для проверки новых настроек
+        if self.connected:
+            self.after(200, lambda: self._request_framebuffer_update(incremental=True))
