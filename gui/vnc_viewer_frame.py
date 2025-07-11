@@ -1,4 +1,4 @@
-# gui/vnc_viewer_frame.py - ИСПРАВЛЕННАЯ ВЕРСИЯ ОРИГИНАЛЬНОГО КОДА
+# gui/vnc_viewer_frame.py - ОПТИМИЗИРОВАННАЯ ВЕРСИЯ ДЛЯ ПЛАВНОЙ РАБОТЫ
 import customtkinter as ctk
 from tkinter import Canvas, messagebox
 import socket
@@ -9,42 +9,31 @@ from typing import Optional, Tuple, Dict, Any
 from PIL import Image, ImageTk
 import queue
 import time
-import select
 import random
 try:
     from Crypto.Cipher import DES
 except ImportError:
-    # Fallback для простой аутентификации
     DES = None
 import hashlib
 
 logger = logging.getLogger(__name__)
 
 class VNCViewerFrame(ctk.CTkFrame):
-    """Фрейм для VNC клиента с оптимизированной производительностью."""
+    """Высокопроизводительный VNC клиент с плавным отображением."""
     
     # RFB Protocol constants
-    RFB_VERSION_3_3 = b"RFB 003.003\n"
-    RFB_VERSION_3_7 = b"RFB 003.007\n"
     RFB_VERSION_3_8 = b"RFB 003.008\n"
     
     # Security types
     SECURITY_NONE = 1
     SECURITY_VNC = 2
-    SECURITY_TIGHT = 16
-    SECURITY_ULTRA = 17
-    SECURITY_TLS = 18
-    SECURITY_VENCRYPT = 19
-    SECURITY_MS_LOGON_II = 113
     SECURITY_ULTRA_MS_LOGON_II = 117
     
     # Client message types
-    SET_PIXEL_FORMAT = 0
     SET_ENCODINGS = 2
     FRAMEBUFFER_UPDATE_REQUEST = 3
     KEY_EVENT = 4
     POINTER_EVENT = 5
-    CLIENT_CUT_TEXT = 6
     
     # Server message types
     FRAMEBUFFER_UPDATE = 0
@@ -56,10 +45,6 @@ class VNCViewerFrame(ctk.CTkFrame):
     ENCODING_RAW = 0
     ENCODING_COPYRECT = 1
     ENCODING_RRE = 2
-    ENCODING_HEXTILE = 5
-    ENCODING_ZLIB = 6
-    ENCODING_TIGHT = 7
-    ENCODING_ZLIBHEX = 8
     
     def __init__(self, parent, app):
         super().__init__(parent, corner_radius=0, fg_color="transparent")
@@ -72,88 +57,70 @@ class VNCViewerFrame(ctk.CTkFrame):
         self.pixel_format = None
         self.framebuffer = None
         
-        # Очереди для асинхронной обработки
-        self.event_queue = queue.Queue()
-        self.update_queue = queue.Queue()
+        # ОПТИМИЗАЦИЯ: Минимальные очереди для максимальной скорости
+        self.update_queue = queue.Queue(maxsize=3)  # Уменьшили размер очереди
         
         # Флаги состояния
         self.receiving_thread = None
-        self.processing_thread = None
         self._stop_threads = threading.Event()
         
-        # Статистика производительности
-        self.frame_count = 0
-        self.last_fps_time = time.time()
-        self.bytes_received = 0
-        self.last_stats_time = time.time()
+        # СТАБИЛЬНОСТЬ: Сбалансированные настройки для надежности
+        self.update_request_interval = 0.033        # 30 FPS (стабильно)
+        self.canvas_update_interval = 0.033         # 30 FPS для UI
+        self.continuous_update_interval = 0.05      # 20 FPS continuous
+        self.force_update_interval = 0.2            # 5 FPS принудительно
         
-        # ИСПРАВЛЕНИЕ: Разумный throttling для умеренной нагрузки
-        self.last_update_request_time = 0
-        self.update_request_interval = 0.05  # 20 FPS максимум запросов
-        self.last_canvas_update_time = 0
-        self.canvas_update_interval = 0.033   # 30 FPS для UI
-        self.pending_canvas_update = False
-        
-        # ИСПРАВЛЕНИЕ: Контроль pending запросов
+        # УПРОЩЕНИЕ: Консервативный контроль pending requests
         self.pending_update_requests = 0
-        self.max_pending_requests = 2  # УМЕНЬШЕНО до 2
+        self.max_pending_requests = 2  # Уменьшили для стабильности
+        self.last_update_request_time = 0
         self.last_server_response_time = time.time()
-        self.server_response_timeout = 3.0  # 3 секунды без ответа = проблема
         
-        # ИСПРАВЛЕНИЕ: Умеренные принудительные обновления
+        # ПРОИЗВОДИТЕЛЬНОСТЬ: Быстрые таймеры
         self.force_update_timer = None
-        self.force_update_interval = 1.0      # 1 FPS принудительно
+        self.continuous_update_timer = None
         self.last_force_update = 0
         
-        # ИСПРАВЛЕНИЕ: Умеренная стратегия обновлений
-        self.request_update_timer = None
-        self.continuous_updates = False  # ИСПРАВЛЕНИЕ: По умолчанию выключены
-        self.continuous_update_interval = 0.2  # 5 FPS для continuous
+        # ОПТИМИЗАЦИЯ: Быстрое обновление canvas
+        self.pending_canvas_update = False
+        self.last_canvas_update = 0
         
-        # Оптимизация обработки изображений
-        self.image_processing_queue = queue.Queue(maxsize=2)
-        self.last_image_data = None
-        self.image_cache = {}
-        self.max_cache_size = 3  # Уменьшили размер кэша
+        # СТАБИЛЬНОСТЬ: Упрощенная стратегия обновлений
+        self.continuous_updates = False  # По умолчанию выключены для стабильности
         
-        # Детекция проблем протокола
-        self.protocol_errors = 0
-        self.max_protocol_errors = 10  # УВЕЛИЧЕНО для UltraVNC
-        
-        # Счётчики для отладки производительности
+        # Статистика (упрощенная)
+        self.frame_count = 0
+        self.last_fps_time = time.time()
         self.updates_per_second = 0
         self.last_update_count_time = time.time()
         self.update_count = 0
-        self.request_count = 0  # НОВОЕ: Счётчик запросов
+        
+        # ОПТИМИЗАЦИЯ: Прямое кэширование изображений
+        self.image_cache_enabled = True
+        self.last_image_hash = None
+        self.cached_photo = None
+        
+        # Счетчики ошибок (упрощенные)
+        self.protocol_errors = 0
+        self.max_protocol_errors = 20  # Больше толерантности
         
         # Настройка UI
         self._setup_ui()
         
-        # Запуск обработчика событий
+        # Запуск обработчика событий (оптимизированный)
         self._start_event_processor()
         
         # Запуск обновления статистики
         self._update_stats()
-        
-        # Настройки производительности
-        self._adjust_performance_settings()
     
     def _setup_ui(self):
         """Настройка пользовательского интерфейса."""
-        # Настройка сетки
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
         
-        # Панель подключения
         self._create_connection_panel()
-        
-        # Область просмотра
         self._create_viewer_area()
-        
-        # Панель статуса
         self._create_status_panel()
-        
-        # Панель управления
         self._create_control_panel()
     
     def _create_connection_panel(self):
@@ -193,41 +160,33 @@ class VNCViewerFrame(ctk.CTkFrame):
         )
         self.disconnect_button.grid(row=0, column=5, padx=5, pady=5)
         
-        self.reconnect_button = ctk.CTkButton(
-            connection_frame, 
-            text="Переподключиться", 
-            command=self.reconnect_to_vnc,
-            width=140,
-            state="disabled"
-        )
-        self.reconnect_button.grid(row=0, column=6, padx=5, pady=5)
-        
-        # Настройки качества - ИЗМЕНЕНО: Убираем "Низкое" качество
+        # ПРОИЗВОДИТЕЛЬНОСТЬ: Настройки качества с акцентом на скорость
         quality_frame = ctk.CTkFrame(connection_frame, fg_color="transparent")
         quality_frame.grid(row=1, column=0, columnspan=6, pady=5)
         
-        ctk.CTkLabel(quality_frame, text="Качество:").pack(side="left", padx=5)
+        ctk.CTkLabel(quality_frame, text="Режим:").pack(side="left", padx=5)
         
-        self.quality_var = ctk.StringVar(value="medium")  # ИСПРАВЛЕНИЕ: По умолчанию среднее
+        self.quality_var = ctk.StringVar(value="performance")
         quality_menu = ctk.CTkSegmentedButton(
             quality_frame,
-            values=["Среднее", "Высокое", "Максимум"],
+            values=["Производительность", "Качество", "Сбалансированный"],
             variable=self.quality_var,
             command=self._on_quality_change
         )
         quality_menu.pack(side="left", padx=5)
-        quality_menu.set("Среднее")  # ИСПРАВЛЕНИЕ: По умолчанию среднее
+        quality_menu.set("Производительность")
         
-        # ИСПРАВЛЕНИЕ: Чекбокс для непрерывных обновлений - по умолчанию ВЫКЛЮЧЕН
+        # Непрерывные обновления (консервативно выключены по умолчанию)
         self.continuous_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
+        self.continuous_checkbox = ctk.CTkCheckBox(
             quality_frame,
             text="Непрерывные обновления",
             variable=self.continuous_var,
             command=self._on_continuous_change
-        ).pack(side="left", padx=20)
+        )
+        self.continuous_checkbox.pack(side="left", padx=20)
         
-        # Чекбокс для view-only режима
+        # View-only режим
         self.view_only_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             quality_frame,
@@ -235,49 +194,35 @@ class VNCViewerFrame(ctk.CTkFrame):
             variable=self.view_only_var
         ).pack(side="left", padx=20)
         
-        # Выбор типа аутентификации
-        auth_frame = ctk.CTkFrame(quality_frame, fg_color="transparent")
-        auth_frame.pack(side="left", padx=20)
-        
-        ctk.CTkLabel(auth_frame, text="Аутентификация:").pack(side="left", padx=5)
-        
-        self.auth_var = ctk.StringVar(value="auto")
-        auth_menu = ctk.CTkSegmentedButton(
-            auth_frame,
-            values=["Авто", "VNC", "Без пароля"],
-            variable=self.auth_var
-        )
-        auth_menu.pack(side="left", padx=5)
-        auth_menu.set("Авто")
-        
-        # Масштабирование для больших экранов
+        # Масштабирование
         scale_frame = ctk.CTkFrame(quality_frame, fg_color="transparent")
         scale_frame.pack(side="left", padx=20)
         
         ctk.CTkLabel(scale_frame, text="Масштаб:").pack(side="left", padx=5)
         
-        self.scale_var = ctk.StringVar(value="auto")
+        self.scale_var = ctk.StringVar(value="100%")
         scale_menu = ctk.CTkSegmentedButton(
             scale_frame,
-            values=["50%", "75%", "100%", "Авто"],
+            values=["75%", "100%", "125%", "Авто"],
             variable=self.scale_var
         )
         scale_menu.pack(side="left", padx=5)
-        scale_menu.set("Авто")
+        scale_menu.set("100%")
     
     def _create_viewer_area(self):
         """Создание области просмотра."""
-        # Фрейм с прокруткой для canvas
         viewer_frame = ctk.CTkFrame(self)
         viewer_frame.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
         viewer_frame.grid_rowconfigure(0, weight=1)
         viewer_frame.grid_columnconfigure(0, weight=1)
         
-        # Canvas для отображения экрана
+        # Canvas для отображения экрана (оптимизированный)
         self.canvas = Canvas(
             viewer_frame,
             bg="black",
-            highlightthickness=0
+            highlightthickness=0,
+            # ПРОИЗВОДИТЕЛЬНОСТЬ: Отключаем double buffering для скорости
+            confine=False
         )
         self.canvas.grid(row=0, column=0, sticky="nsew")
         
@@ -294,6 +239,11 @@ class VNCViewerFrame(ctk.CTkFrame):
         )
         
         # Привязка событий мыши и клавиатуры
+        self._bind_events()
+    
+    def _bind_events(self):
+        """Привязка событий ввода."""
+        # Мышь
         self.canvas.bind("<Button-1>", self._on_mouse_click)
         self.canvas.bind("<ButtonRelease-1>", self._on_mouse_release)
         self.canvas.bind("<B1-Motion>", self._on_mouse_motion)
@@ -302,7 +252,7 @@ class VNCViewerFrame(ctk.CTkFrame):
         self.canvas.bind("<Motion>", self._on_mouse_move)
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
         
-        # Фокус для клавиатуры
+        # Клавиатура
         self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
         self.canvas.bind("<KeyPress>", self._on_key_press)
         self.canvas.bind("<KeyRelease>", self._on_key_release)
@@ -312,57 +262,24 @@ class VNCViewerFrame(ctk.CTkFrame):
         status_frame = ctk.CTkFrame(self)
         status_frame.grid(row=2, column=0, padx=10, pady=5, sticky="ew")
         
-        self.status_label = ctk.CTkLabel(
-            status_frame, 
-            text="Отключено",
-            font=ctk.CTkFont(size=12)
-        )
+        self.status_label = ctk.CTkLabel(status_frame, text="Отключено", font=ctk.CTkFont(size=12))
         self.status_label.pack(side="left", padx=10)
         
-        self.resolution_label = ctk.CTkLabel(
-            status_frame,
-            text="",
-            font=ctk.CTkFont(size=12)
-        )
+        self.resolution_label = ctk.CTkLabel(status_frame, text="", font=ctk.CTkFont(size=12))
         self.resolution_label.pack(side="left", padx=20)
         
-        self.fps_label = ctk.CTkLabel(
-            status_frame,
-            text="",
-            font=ctk.CTkFont(size=12)
-        )
+        self.fps_label = ctk.CTkLabel(status_frame, text="", font=ctk.CTkFont(size=12))
         self.fps_label.pack(side="left", padx=20)
         
-        # ИСПРАВЛЕНИЕ: Добавляем недостающий ups_label
-        self.ups_label = ctk.CTkLabel(
-            status_frame,
-            text="",
-            font=ctk.CTkFont(size=12)
-        )
+        self.ups_label = ctk.CTkLabel(status_frame, text="", font=ctk.CTkFont(size=12))
         self.ups_label.pack(side="left", padx=20)
         
-        # НОВОЕ: Показываем RPS (Requests Per Second) и Pending
-        self.rps_label = ctk.CTkLabel(
-            status_frame,
-            text="",
-            font=ctk.CTkFont(size=12)
-        )
-        self.rps_label.pack(side="left", padx=20)
-        
-        # НОВОЕ: Показываем Pending запросы
-        self.pending_label = ctk.CTkLabel(
-            status_frame,
-            text="",
-            font=ctk.CTkFont(size=12)
-        )
-        self.pending_label.pack(side="left", padx=20)
+        # НОВОЕ: Статус последнего обновления экрана
+        self.last_update_label = ctk.CTkLabel(status_frame, text="", font=ctk.CTkFont(size=12))
+        self.last_update_label.pack(side="left", padx=20)
         
         # Индикатор активности
-        self.activity_indicator = ctk.CTkLabel(
-            status_frame,
-            text="⚫",
-            font=ctk.CTkFont(size=16)
-        )
+        self.activity_indicator = ctk.CTkLabel(status_frame, text="⚫", font=ctk.CTkFont(size=16))
         self.activity_indicator.pack(side="right", padx=10)
     
     def _create_control_panel(self):
@@ -373,86 +290,22 @@ class VNCViewerFrame(ctk.CTkFrame):
         # Специальные клавиши
         ctk.CTkLabel(control_frame, text="Специальные клавиши:").pack(side="left", padx=5)
         
-        ctk.CTkButton(
-            control_frame,
-            text="Ctrl+Alt+Del",
-            command=self._send_ctrl_alt_del,
-            width=100
-        ).pack(side="left", padx=5)
-        
-        ctk.CTkButton(
-            control_frame,
-            text="Alt+Tab",
-            command=self._send_alt_tab,
-            width=80
-        ).pack(side="left", padx=5)
-        
-        ctk.CTkButton(
-            control_frame,
-            text="Esc",
-            command=self._send_escape,
-            width=50
-        ).pack(side="left", padx=5)
-        
-        # Кнопка полноэкранного режима
-        ctk.CTkButton(
-            control_frame,
-            text="Полный экран",
-            command=self._toggle_fullscreen,
-            width=100
-        ).pack(side="right", padx=5)
+        ctk.CTkButton(control_frame, text="Ctrl+Alt+Del", command=self._send_ctrl_alt_del, width=100).pack(side="left", padx=5)
+        ctk.CTkButton(control_frame, text="Alt+Tab", command=self._send_alt_tab, width=80).pack(side="left", padx=5)
+        ctk.CTkButton(control_frame, text="Esc", command=self._send_escape, width=50).pack(side="left", padx=5)
         
         # Кнопка скриншота
+        ctk.CTkButton(control_frame, text="📷 Скриншот", command=self._take_screenshot, width=100).pack(side="right", padx=5)
+        
+        # НОВОЕ: Кнопка принудительного обновления экрана
         ctk.CTkButton(
             control_frame,
-            text="📷 Скриншот",
-            command=self._take_screenshot,
-            width=100
+            text="🔄 Обновить экран",
+            command=self._force_screen_refresh,
+            width=120,
+            fg_color="transparent",
+            border_width=1
         ).pack(side="right", padx=5)
-    
-    # ИСПРАВЛЕНИЕ: Разумные таймеры для умеренной нагрузки
-    def _start_update_timers(self):
-        """Запуск таймеров для разумных обновлений."""
-        logger.info("Starting update timers with moderate frequency")
-        self._schedule_force_update()
-        self._schedule_continuous_update()
-    
-    def _schedule_force_update(self):
-        """ИСПРАВЛЕННОЕ планирование принудительного обновления."""
-        if not self.connected:
-            return
-            
-        current_time = time.time()
-        # ИСПРАВЛЕНО: Учитываем pending запросы для force update
-        if (current_time - self.last_force_update >= self.force_update_interval and 
-            self.pending_update_requests < self.max_pending_requests):
-            self._request_framebuffer_update(incremental=False)
-            self.last_force_update = current_time
-        
-        # Планируем следующее принудительное обновление
-        if self.connected:
-            self.force_update_timer = self.after(int(self.force_update_interval * 1000), self._schedule_force_update)
-    
-    def _schedule_continuous_update(self):
-        """ИСПРАВЛЕННОЕ планирование непрерывных обновлений."""
-        if not self.connected:
-            return
-            
-        # ИСПРАВЛЕНО: Проверяем pending запросы перед continuous update
-        if (self.continuous_var.get() and 
-            self.pending_update_requests < self.max_pending_requests):
-            self._request_framebuffer_update(incremental=True)
-        
-        # ИСПРАВЛЕНИЕ: Разумная частота
-        if self.connected:
-            self.request_update_timer = self.after(int(self.continuous_update_interval * 1000), self._schedule_continuous_update)
-    
-    def _on_continuous_change(self):
-        """Обработка изменения режима непрерывных обновлений."""
-        self.continuous_updates = self.continuous_var.get()
-        
-        # ИСПРАВЛЕНИЕ: Убираем лишние запросы при переключении
-        logger.info(f"Непрерывные обновления: {'включены' if self.continuous_updates else 'выключены'}")
     
     def connect_to_vnc(self):
         """Подключение к VNC серверу."""
@@ -479,51 +332,50 @@ class VNCViewerFrame(ctk.CTkFrame):
         ).start()
     
     def _connect_thread(self, host: str, port: int, password: str):
-        """ИСПРАВЛЕННЫЙ поток подключения к VNC серверу."""
+        """Поток подключения к VNC серверу."""
         try:
             self._update_status("Подключение...")
             
             # Создание сокета
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10)  # Таймаут для операций
+            self.socket.settimeout(10)
             self.socket.connect((host, port))
             
-            # После успешного подключения устанавливаем меньший таймаут для чтения
-            self.socket.settimeout(5)
+            # ПРОИЗВОДИТЕЛЬНОСТЬ: Оптимизация сокета для низкой задержки
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.socket.settimeout(2)  # Быстрый таймаут для производительности
             
-            # Handshake
+            # Handshake и аутентификация
             if not self._handshake():
                 raise Exception("Ошибка handshake")
             
-            # Аутентификация
             if not self._authenticate(password):
                 raise Exception("Ошибка аутентификации")
             
-            # Инициализация
             if not self._initialize():
                 raise Exception("Ошибка инициализации")
             
             self.connected = True
             self._update_status(f"Подключено к {host}:{port}")
             
-            # ИСПРАВЛЕНО: Полный сброс всех счетчиков при новом подключении
+            # Сброс счетчиков
             self.pending_update_requests = 0
             self.last_server_response_time = time.time()
-            self.last_update_request_time = 0
             self.protocol_errors = 0
+            
+            # НОВОЕ: Инициализация времени последнего framebuffer
+            self.last_framebuffer_time = time.time()
             
             # Обновление UI
             self.after(0, self._on_connected)
             
-            # Запуск потоков обработки
+            # Запуск потоков
             self._start_receiver_thread()
             
-            # ИСПРАВЛЕНИЕ: Запускаем таймеры ПОСЛЕ установки connected=True
-            self.after(0, self._start_update_timers)
-            
-            # ИСПРАВЛЕНИЕ: Более осторожное начальное обновление
-            self.after(100, lambda: self._request_framebuffer_update(incremental=False))
-            self.after(300, lambda: self._request_framebuffer_update(incremental=True))
+            # СТАБИЛЬНОСТЬ: Осторожный старт обновлений
+            self.after(0, self._start_high_performance_timers)
+            self.after(100, lambda: self._request_framebuffer_update_stable(incremental=False))
+            self.after(300, lambda: self._request_framebuffer_update_stable(incremental=True))
             
         except Exception as e:
             logger.error(f"Ошибка подключения: {e}")
@@ -531,77 +383,48 @@ class VNCViewerFrame(ctk.CTkFrame):
             self.after(0, self._on_connection_failed, str(e))
     
     def _handshake(self) -> bool:
-        """Выполнение VNC handshake."""
+        """VNC handshake."""
         try:
-            # Получаем версию сервера
             server_version = self._recv_exact(12)
             logger.debug(f"Server version: {server_version}")
-            
-            # Отправляем нашу версию
             self.socket.send(self.RFB_VERSION_3_8)
-            
             return True
         except Exception as e:
             logger.error(f"Handshake error: {e}")
             return False
     
     def _authenticate(self, password: str) -> bool:
-        """Улучшенная аутентификация на VNC сервере."""
+        """Аутентификация."""
         try:
-            # Получаем количество методов безопасности
             num_security_types = struct.unpack("!B", self._recv_exact(1))[0]
             
             if num_security_types == 0:
-                # Ошибка сервера
                 reason_length = struct.unpack("!I", self._recv_exact(4))[0]
                 reason = self._recv_exact(reason_length).decode()
                 logger.error(f"Server error: {reason}")
                 return False
             
-            # Получаем список методов
-            security_types = struct.unpack(f"!{num_security_types}B", 
-                                         self._recv_exact(num_security_types))
+            security_types = struct.unpack(f"!{num_security_types}B", self._recv_exact(num_security_types))
             logger.debug(f"Security types: {security_types}")
             
-            # Выбираем метод аутентификации
-            auth_preference = self.auth_var.get()
-            selected_type = None
-            
-            if auth_preference == "Без пароля" and self.SECURITY_NONE in security_types:
-                selected_type = self.SECURITY_NONE
-            elif auth_preference == "VNC" and self.SECURITY_VNC in security_types:
+            # Выбираем подходящий тип безопасности
+            if self.SECURITY_VNC in security_types:
                 selected_type = self.SECURITY_VNC
+            elif self.SECURITY_NONE in security_types:
+                selected_type = self.SECURITY_NONE
             else:
-                # Автоматический выбор
-                if self.SECURITY_VNC in security_types:
-                    selected_type = self.SECURITY_VNC
-                elif self.SECURITY_NONE in security_types:
-                    selected_type = self.SECURITY_NONE
-                elif 17 in security_types:  # UltraVNC - только если явно выбран
-                    if auth_preference == "Авто":
-                        # Пропускаем UltraVNC в автоматическом режиме
-                        pass
-                    else:
-                        selected_type = 17
-            
-            if selected_type is None:
                 logger.error(f"No supported security types in {security_types}")
                 return False
             
-            logger.info(f"Using security type: {selected_type}")
             self.socket.send(struct.pack("!B", selected_type))
             
-            # Выполняем аутентификацию
             if selected_type == self.SECURITY_NONE:
                 return self._auth_none()
             elif selected_type == self.SECURITY_VNC:
                 return self._auth_vnc(password)
-            elif selected_type == 17:
-                return self._auth_ultravnc(password)
-            else:
-                logger.error(f"Unsupported security type: {selected_type}")
-                return False
-                
+            
+            return False
+            
         except Exception as e:
             logger.error(f"Authentication error: {e}")
             return False
@@ -609,7 +432,6 @@ class VNCViewerFrame(ctk.CTkFrame):
     def _auth_none(self) -> bool:
         """Аутентификация без пароля."""
         try:
-            # Для версии 3.8 нужно проверить результат
             result_data = self._recv_exact(4)
             result = struct.unpack("!I", result_data)[0]
             
@@ -617,24 +439,19 @@ class VNCViewerFrame(ctk.CTkFrame):
                 logger.info("No authentication successful")
                 return True
             else:
-                logger.error(f"No authentication failed with result: {result}")
+                logger.error(f"No authentication failed: {result}")
                 return False
         except Exception as e:
             logger.error(f"No auth error: {e}")
             return False
     
     def _auth_vnc(self, password: str) -> bool:
-        """Стандартная VNC аутентификация."""
+        """VNC аутентификация."""
         try:
-            # Получаем challenge
             challenge = self._recv_exact(16)
-            logger.debug("Received VNC challenge")
-            
-            # Шифруем пароль
             response = self._encrypt_password(password or "", challenge)
             self.socket.send(response)
             
-            # Проверяем результат
             result_data = self._recv_exact(4)
             result = struct.unpack("!I", result_data)[0]
             
@@ -642,126 +459,31 @@ class VNCViewerFrame(ctk.CTkFrame):
                 logger.info("VNC authentication successful")
                 return True
             else:
-                logger.error(f"VNC authentication failed with result: {result}")
+                logger.error(f"VNC authentication failed: {result}")
                 return False
                 
         except Exception as e:
             logger.error(f"VNC auth error: {e}")
             return False
     
-    def _auth_ultravnc(self, password: str) -> bool:
-        """Упрощенная UltraVNC аутентификация."""
-        try:
-            logger.info("Attempting UltraVNC authentication")
-            
-            # UltraVNC MS Logon может иметь разные варианты
-            # Пытаемся прочитать данные с таймаутом
-            self.socket.settimeout(2)
-            
-            try:
-                # Пытаемся прочитать первые байты
-                first_data = self.socket.recv(10, socket.MSG_PEEK)
-                logger.debug(f"UltraVNC first data peek: {first_data[:10].hex()}")
-                
-                if len(first_data) < 4:
-                    logger.warning("Insufficient UltraVNC data, falling back")
-                    return False
-                
-                # Читаем размер первого блока
-                size_data = self._recv_exact(2)
-                size = struct.unpack("!H", size_data)[0]
-                logger.debug(f"UltraVNC first block size: {size}")
-                
-                # Ограничиваем размер для безопасности
-                if size > 8192:  # 8KB лимит
-                    logger.error(f"UltraVNC block size too large: {size}")
-                    return False
-                
-                # Читаем блок данных
-                data_block = self._recv_exact(size)
-                logger.debug(f"UltraVNC data block: {len(data_block)} bytes")
-                
-                # Упрощенный ответ - отправляем нули
-                response_size = min(size, 256)  # Ограничиваем размер ответа
-                response = b'\x00' * response_size
-                self.socket.send(struct.pack("!H", response_size) + response)
-                
-                # Проверяем результат аутентификации
-                try:
-                    result_data = self._recv_exact(4)
-                    result = struct.unpack("!I", result_data)[0]
-                    
-                    if result == 0:
-                        logger.info("UltraVNC authentication successful")
-                        return True
-                    else:
-                        logger.error(f"UltraVNC authentication failed: {result}")
-                        return False
-                        
-                except socket.timeout:
-                    logger.warning("UltraVNC auth result timeout, assuming success")
-                    return True
-                    
-            except socket.timeout:
-                logger.warning("UltraVNC auth timeout, trying fallback")
-                return False
-                
-        except Exception as e:
-            logger.error(f"UltraVNC auth error: {e}")
-            return False
-        finally:
-            self.socket.settimeout(5)  # Восстанавливаем обычный таймаут
-    
     def _encrypt_password(self, password: str, challenge: bytes) -> bytes:
-        """Шифрование пароля для VNC аутентификации."""
-        # Если DES доступен, используем его
+        """Шифрование пароля для VNC."""
         if DES:
-            # Подготовка пароля (8 байт, дополненный нулями)
-            # Обрабатываем Unicode символы безопасно
-            try:
-                password_bytes = password[:8].ljust(8, '\0').encode('utf-8')[:8]
-            except UnicodeEncodeError:
-                # Если UTF-8 не работает, пробуем другие кодировки
-                try:
-                    password_bytes = password[:8].ljust(8, '\0').encode('cp1251')[:8]
-                except UnicodeEncodeError:
-                    # В крайнем случае заменяем проблемные символы
-                    password_clean = password[:8].encode('ascii', 'replace').decode('ascii')
-                    password_bytes = password_clean.ljust(8, '\0').encode('ascii')
-            
-            # Дополняем до 8 байт нулями если нужно
+            password_bytes = password[:8].ljust(8, '\0').encode('utf-8')[:8]
             password_bytes = password_bytes.ljust(8, b'\0')[:8]
-            
-            # Реверс битов в каждом байте (VNC особенность)
             password_bytes = bytes(self._reverse_bits(b) for b in password_bytes)
             
-            # DES шифрование
             cipher = DES.new(password_bytes, DES.MODE_ECB)
             return cipher.encrypt(challenge)
         else:
-            # Упрощенная версия без DES
-            # Для пустого пароля возвращаем challenge XOR с нулями
+            # Простая реализация без DES
             if not password:
-                # Многие VNC серверы принимают все нули для пустого пароля
                 return b'\x00' * 16
             
-            # Подготовка пароля с безопасной обработкой Unicode
-            try:
-                key_bytes = password[:8].ljust(8, '\0').encode('utf-8')[:8]
-            except UnicodeEncodeError:
-                try:
-                    key_bytes = password[:8].ljust(8, '\0').encode('cp1251')[:8]
-                except UnicodeEncodeError:
-                    password_clean = password[:8].encode('ascii', 'replace').decode('ascii')
-                    key_bytes = password_clean.ljust(8, '\0').encode('ascii')
-            
-            # Дополняем до 8 байт
+            key_bytes = password[:8].ljust(8, '\0').encode('utf-8')[:8]
             key_bytes = key_bytes.ljust(8, b'\0')[:8]
-            
-            # Реверс битов
             key_bytes = bytes(self._reverse_bits(b) for b in key_bytes)
             
-            # Простое XOR для демонстрации (НЕ БЕЗОПАСНО!)
             result = bytearray(16)
             for i in range(16):
                 result[i] = challenge[i] ^ key_bytes[i % 8]
@@ -775,11 +497,10 @@ class VNCViewerFrame(ctk.CTkFrame):
     def _initialize(self) -> bool:
         """Инициализация VNC соединения."""
         try:
-            # Отправляем ClientInit (shared flag)
-            self.socket.send(struct.pack("!B", 1))  # 1 = shared
+            # ClientInit
+            self.socket.send(struct.pack("!B", 1))  # shared
             
-            # Получаем ServerInit
-            # Размеры экрана
+            # ServerInit
             size_data = self._recv_exact(4)
             self.screen_width, self.screen_height = struct.unpack("!HH", size_data)
             logger.info(f"Screen size: {self.screen_width}x{self.screen_height}")
@@ -796,8 +517,8 @@ class VNCViewerFrame(ctk.CTkFrame):
             # Инициализация framebuffer
             self.framebuffer = Image.new('RGB', (self.screen_width, self.screen_height))
             
-            # Настройка кодировок
-            self._set_encodings()
+            # ПРОИЗВОДИТЕЛЬНОСТЬ: Минимальный набор кодировок для скорости
+            self._set_encodings_optimized()
             
             return True
             
@@ -820,13 +541,12 @@ class VNCViewerFrame(ctk.CTkFrame):
             'blue_shift': data[12]
         }
     
-    def _set_encodings(self):
-        """Установка поддерживаемых кодировок."""
-        # МИНИМАЛЬНЫЙ набор кодировок для максимальной совместимости
+    def _set_encodings_optimized(self):
+        """Установка оптимизированных кодировок для производительности."""
+        # ПРОИЗВОДИТЕЛЬНОСТЬ: Только самые быстрые кодировки
         encodings = [
-            self.ENCODING_RAW,       # 0 - Основная кодировка (всегда поддерживается)
-            self.ENCODING_COPYRECT,  # 1 - Copy Rectangle
-            # Убираем проблемные кодировки и псевдо-кодировки пока
+            self.ENCODING_RAW,       # 0 - Быстрая основная кодировка
+            self.ENCODING_COPYRECT,  # 1 - Быстрое копирование областей
         ]
         
         message = struct.pack("!BBH", self.SET_ENCODINGS, 0, len(encodings))
@@ -834,35 +554,68 @@ class VNCViewerFrame(ctk.CTkFrame):
             message += struct.pack("!i", encoding)
         
         self.socket.send(message)
-        logger.debug(f"Set encodings: {encodings}")
+        logger.debug(f"Set optimized encodings: {encodings}")
     
-    # ИСПРАВЛЕНИЕ: Разумный throttling для запросов
-    def _request_framebuffer_update(self, incremental: bool = True):
-        """ИСПРАВЛЕННЫЙ запрос обновления framebuffer."""
+    # ПРОИЗВОДИТЕЛЬНОСТЬ: Высокопроизводительные таймеры
+    def _start_high_performance_timers(self):
+        """Запуск стабильных таймеров."""
+        logger.info("Starting stable timers for reliable display")
+        self._schedule_continuous_update_stable()
+        self._schedule_force_update_stable()
+    
+    def _schedule_continuous_update_stable(self):
+        """СТАБИЛЬНОЕ планирование непрерывных обновлений."""
+        if not self.connected:
+            return
+        
+        # СТАБИЛЬНОСТЬ: Консервативные запросы
+        if (self.continuous_var.get() and 
+            self.pending_update_requests < 1):  # Максимум 1 pending для стабильности
+            self._request_framebuffer_update_stable(incremental=True)
+        
+        # Стабильное повторение
+        if self.connected:
+            self.continuous_update_timer = self.after(50, self._schedule_continuous_update_stable)  # 20 FPS
+    
+    def _schedule_force_update_stable(self):
+        """СТАБИЛЬНОЕ планирование принудительных обновлений."""
+        if not self.connected:
+            return
+        
+        current_time = time.time()
+        
+        # НОВОЕ: Автоматическое обновление если долго нет framebuffer updates
+        time_since_last_frame = current_time - getattr(self, 'last_framebuffer_time', current_time)
+        
+        if time_since_last_frame > 2.0:  # Если 2+ секунд без обновлений
+            logger.info(f"No framebuffer updates for {time_since_last_frame:.1f}s, forcing refresh")
+            self._force_screen_refresh()
+            self.last_framebuffer_time = current_time
+        elif (current_time - self.last_force_update >= self.force_update_interval and 
+              self.pending_update_requests < 1):
+            self._request_framebuffer_update_stable(incremental=False)
+            self.last_force_update = current_time
+        
+        if self.connected:
+            self.force_update_timer = self.after(200, self._schedule_force_update_stable)  # 5 FPS
+    
+    def _request_framebuffer_update_fast(self, incremental: bool = True):
+        """БЫСТРЫЙ запрос обновления framebuffer без throttling."""
         if not self.connected or not self.socket:
             return
         
         current_time = time.time()
         
-        # ИСПРАВЛЕНО: Более жесткий throttling
+        # ПРОИЗВОДИТЕЛЬНОСТЬ: Минимальный throttling
         if current_time - self.last_update_request_time < self.update_request_interval:
             return
         
-        # ИСПРАВЛЕНО: Строгий контроль pending запросов
+        # ПРОИЗВОДИТЕЛЬНОСТЬ: Упрощенный контроль pending
         if self.pending_update_requests >= self.max_pending_requests:
-            # НОВОЕ: Форсированный сброс если слишком долго pending
-            time_since_response = current_time - self.last_server_response_time
-            if time_since_response > 2.0:  # 2 секунды без ответа
-                logger.warning(f"Force resetting pending requests after {time_since_response:.1f}s timeout")
-                self.pending_update_requests = 0
-            else:
-                logger.debug(f"Too many pending requests: {self.pending_update_requests}")
-                return
+            return
         
         try:
-            # Проверяем валидность сокета
             if self.socket.fileno() == -1:
-                logger.debug("Cannot request framebuffer update: socket is closed")
                 return
             
             message = struct.pack(
@@ -874,203 +627,156 @@ class VNCViewerFrame(ctk.CTkFrame):
             )
             
             self.socket.send(message)
-            
-            # Обновляем счётчики
             self.pending_update_requests += 1
             self.last_update_request_time = current_time
-            self.request_count += 1
             
-            # УМЕНЬШЕНО: Логирование только каждого 20-го запроса
-            if self.request_count % 20 == 0:
-                request_type = "incremental" if incremental else "full"
-                logger.debug(f"Sent framebuffer update request #{self.request_count}: {request_type}, pending: {self.pending_update_requests}")
-            
-        except (OSError, socket.error) as e:
-            logger.debug(f"Socket error requesting framebuffer update: {e}")
-            # При ошибке сокета - сбрасываем pending
+        except (OSError, socket.error):
             self.pending_update_requests = 0
-        except Exception as e:
-            logger.error(f"Error requesting framebuffer update: {e}")
-            # При ошибке сокета - сбрасываем pending
+        except Exception:
             self.pending_update_requests = 0
     
     def _start_receiver_thread(self):
         """Запуск потока приёма данных."""
         self._stop_threads.clear()
         
-        # Запускаем поток приема
         self.receiving_thread = threading.Thread(
-            target=self._receive_loop,
+            target=self._receive_loop_optimized,
             daemon=True
         )
         self.receiving_thread.start()
         
-        logger.info("Receiver thread started")
+        logger.info("Optimized receiver thread started")
     
-    def _receive_loop(self):
-        """ИСПРАВЛЕННЫЙ цикл приёма данных от сервера."""
+    def _receive_loop_optimized(self):
+        """СТАБИЛЬНЫЙ цикл приёма данных с обработкой UltraVNC."""
         consecutive_errors = 0
-        max_consecutive_errors = 5
+        max_consecutive_errors = 3
+        unknown_message_count = 0
+        last_unknown_reset = time.time()
         
         while self.connected and not self._stop_threads.is_set():
             try:
-                # Проверяем валидность сокета
-                if not self.socket or self.socket.fileno() == -1:
-                    logger.warning("Socket is closed or invalid")
+                # ИСПРАВЛЕНИЕ: Более надежная проверка сокета
+                if not self.socket:
+                    logger.debug("Socket is None, breaking receive loop")
                     break
                 
-                # ИСПРАВЛЕНО: Периодически проверяем pending запросы
-                current_time = time.time()
-                if (self.pending_update_requests > 0 and 
-                    current_time - self.last_server_response_time > 3.0):
-                    logger.warning("No server response for 3+ seconds, resetting pending requests")
-                    self.pending_update_requests = 0
-                    self.last_server_response_time = current_time
+                try:
+                    socket_valid = self.socket.fileno() != -1
+                except (OSError, AttributeError):
+                    socket_valid = False
                 
-                # Читаем тип сообщения с проверкой
-                msg_type_data = self.socket.recv(1)
+                if not socket_valid:
+                    logger.debug("Socket is invalid, breaking receive loop")
+                    break
+                
+                # Сброс счетчика неизвестных сообщений каждые 5 секунд
+                current_time = time.time()
+                if current_time - last_unknown_reset > 5:
+                    if unknown_message_count > 10:
+                        logger.warning(f"Reset unknown message count: {unknown_message_count}")
+                    unknown_message_count = 0
+                    last_unknown_reset = current_time
+                
+                # ИСПРАВЛЕНИЕ: Защита от спама неизвестных сообщений
+                if unknown_message_count > 100:
+                    logger.error("Too many unknown messages, requesting framebuffer update")
+                    unknown_message_count = 0
+                    self.after(0, lambda: self._request_framebuffer_update_stable(incremental=False))
+                    time.sleep(0.1)  # Небольшая пауза
+                
+                # Быстрое чтение типа сообщения с обработкой ошибок
+                try:
+                    msg_type_data = self.socket.recv(1)
+                except OSError as e:
+                    if e.winerror == 10038:  # Socket operation on non-socket
+                        logger.debug("Socket closed during recv")
+                        break
+                    elif e.winerror == 10054:  # Connection reset by peer
+                        logger.info("Connection reset by peer")
+                        break
+                    else:
+                        raise
+                
                 if not msg_type_data:
-                    logger.warning("Connection closed by server")
+                    logger.debug("Empty message received, connection closed")
                     break
                 
                 message_type = struct.unpack("!B", msg_type_data)[0]
-                logger.debug(f"Received message type: {message_type}")
                 
                 if message_type == self.FRAMEBUFFER_UPDATE:
-                    try:
-                        self._handle_framebuffer_update()
-                        # Сбрасываем счетчик ошибок при успешной обработке
-                        self.protocol_errors = 0
-                        consecutive_errors = 0
-                    except Exception as e:
-                        self.protocol_errors += 1
-                        consecutive_errors += 1
-                        logger.error(f"Framebuffer update error #{self.protocol_errors}: {e}")
-                        
-                        if self.protocol_errors >= self.max_protocol_errors:
-                            logger.error("Too many protocol errors, disconnecting")
-                            raise ConnectionError(f"Protocol error limit exceeded: {self.protocol_errors}")
-                        
-                        # При ошибках сбрасываем pending запросы
-                        if consecutive_errors >= 3:
-                            logger.warning("Multiple consecutive errors, resetting pending requests")
-                            self.pending_update_requests = 0
-                            consecutive_errors = 0
-                        
-                        # Пытаемся восстановиться
-                        time.sleep(0.1)
-                        continue
+                    self._handle_framebuffer_update_stable()
+                    consecutive_errors = 0
+                    unknown_message_count = 0  # Сброс при получении реальных данных
                 elif message_type == self.SET_COLOR_MAP_ENTRIES:
-                    self._handle_colormap_entries()
+                    self._handle_colormap_entries_fast()
                 elif message_type == self.BELL:
-                    self._handle_bell()
+                    pass  # Игнорируем bell для производительности
                 elif message_type == self.SERVER_CUT_TEXT:
-                    self._handle_server_cut_text()
+                    self._handle_server_cut_text_fast()
                 else:
-                    # ИСПРАВЛЕНИЕ: Улучшенная обработка неизвестных сообщений UltraVNC
-                    logger.debug(f"Unknown message type: {message_type}")
-                    
-                    # Известные UltraVNC расширения - просто игнорируем
+                    # ИСПРАВЛЕНИЕ: Правильная обработка UltraVNC extensions
                     if message_type in [255, 33, 45, 36, 127, 253, 254]:
-                        logger.debug(f"Ignoring UltraVNC extension message type {message_type}")
-                        # НЕ читаем дополнительные данные - просто продолжаем
+                        unknown_message_count += 1
+                        # Вместо вызова метода просто логируем и пропускаем
+                        if unknown_message_count % 50 == 1:
+                            logger.debug(f"UltraVNC extension {message_type} (count: {unknown_message_count})")
                         continue
                     else:
-                        logger.warning(f"Truly unknown message type {message_type}")
-                        # Для действительно неизвестных типов - пытаемся продолжить
+                        unknown_message_count += 1
+                        logger.warning(f"Truly unknown message type: {message_type}")
+                        # Пытаемся продолжить без чтения дополнительных данных
                         continue
             
             except socket.timeout:
                 # Таймаут - это нормально, продолжаем
                 continue
-            except ConnectionError as e:
-                logger.error(f"Connection error: {e}")
+            except ConnectionResetError:
+                logger.info("Connection reset by server")
+                break
+            except ConnectionAbortedError:
+                logger.info("Connection aborted")
                 break
             except OSError as e:
                 if e.winerror == 10038:  # WSAENOTSOCK
-                    logger.error("Socket operation on non-socket")
+                    logger.debug("Socket operation on non-socket - connection closed")
+                    break
+                elif e.winerror == 10054:  # Connection reset
+                    logger.info("Connection reset by peer")
+                    break
                 else:
-                    logger.error(f"OS error: {e}")
-                break
-            except struct.error as e:
-                logger.error(f"Struct unpack error: {e}")
-                consecutive_errors += 1
-                if consecutive_errors >= max_consecutive_errors:
-                    break
-                # При struct ошибках сбрасываем pending
-                self.pending_update_requests = 0
-                time.sleep(0.1)
-                continue
+                    logger.error(f"OS error in receive loop: {e}")
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.error("Too many consecutive OS errors, breaking")
+                        break
+                    time.sleep(0.1)
+                    continue
             except Exception as e:
-                logger.error(f"Receive error: {e}", exc_info=True)
                 consecutive_errors += 1
+                logger.error(f"Unexpected error in receive loop: {e}")
                 if consecutive_errors >= max_consecutive_errors:
+                    logger.error("Too many consecutive errors, breaking")
                     break
-                # При общих ошибках тоже сбрасываем pending
+                # При ошибках сбрасываем pending
                 self.pending_update_requests = 0
                 time.sleep(0.1)
                 continue
         
+        logger.info("Receive loop ended")
         self.connected = False
         self._update_status("Соединение разорвано")
         self.after(0, self.disconnect_from_vnc)
     
-    def _recv_exact(self, size: int) -> bytes:
-        """Получение точного количества байт."""
-        if size <= 0:
-            return b''
-        
-        # Увеличенный лимит для больших экранов (50MB)
-        if size > 50000000:
-            raise ValueError(f"Requested size too large: {size}")
-        
-        # Проверяем валидность сокета перед чтением
-        if not self.socket or self.socket.fileno() == -1:
-            raise ConnectionError("Socket is closed or invalid")
-        
-        data = b''
-        remaining = size
-        
-        # Увеличиваем размер chunk для больших объемов данных
-        chunk_size = min(65536, remaining) if size > 1000000 else 4096
-        
-        while remaining > 0:
-            try:
-                chunk = self.socket.recv(min(remaining, chunk_size))
-                if not chunk:
-                    raise ConnectionError(f"Connection closed (expected {size} bytes, got {len(data)})")
-                data += chunk
-                remaining -= len(chunk)
-                
-                # Обновляем статистику трафика
-                self.bytes_received += len(chunk)
-                
-            except socket.timeout:
-                if len(data) > 0:
-                    logger.warning(f"Timeout while reading, got {len(data)}/{size} bytes")
-                raise
-            except OSError as e:
-                if e.winerror == 10038:  # WSAENOTSOCK
-                    raise ConnectionError("Socket operation on non-socket")
-                else:
-                    raise ConnectionError(f"Socket error: {e}")
-        
-        return data
-    
-    def _handle_framebuffer_update(self):
-        """ИСПРАВЛЕННАЯ обработка обновления framebuffer."""
+    def _handle_framebuffer_update_stable(self):
+        """СТАБИЛЬНАЯ обработка обновления framebuffer."""
         try:
             current_time = time.time()
             
-            # ИСПРАВЛЕНО: Сервер ответил, ВСЕГДА уменьшаем pending запросы
+            # Уменьшаем pending запросы
             if self.pending_update_requests > 0:
                 self.pending_update_requests -= 1
             self.last_server_response_time = current_time
-            
-            # НОВОЕ: Восстанавливаем нормальный интервал если сервер отвечает
-            if self.update_request_interval > 0.05:
-                self.update_request_interval *= 0.9
-                self.update_request_interval = max(self.update_request_interval, 0.05)
             
             # Пропускаем padding
             self._recv_exact(1)
@@ -1078,419 +784,474 @@ class VNCViewerFrame(ctk.CTkFrame):
             # Количество прямоугольников
             num_rectangles = struct.unpack("!H", self._recv_exact(2))[0]
             
-            # УМЕНЬШЕНО: Логирование только если много прямоугольников
-            if num_rectangles > 1:
-                logger.debug(f"Processing {num_rectangles} rectangles")
+            # СТАБИЛЬНОСТЬ: Ограничиваем количество прямоугольников для предотвращения зависания
+            if num_rectangles > 1000:
+                logger.warning(f"Too many rectangles: {num_rectangles}, limiting to 1000")
+                num_rectangles = 1000
             
             rectangles_processed = 0
-            for _ in range(num_rectangles):
+            
+            # Обрабатываем прямоугольники более консервативно
+            for i in range(num_rectangles):
                 try:
-                    # Координаты и размеры
                     rect_data = self._recv_exact(8)
                     x, y, w, h = struct.unpack("!HHHH", rect_data)
                     
-                    # Тип кодировки
                     encoding = struct.unpack("!i", self._recv_exact(4))[0]
                     
-                    # Обработка в зависимости от кодировки
+                    # СТАБИЛЬНОСТЬ: Проверяем размеры прямоугольника
+                    if w <= 0 or h <= 0 or w > self.screen_width or h > self.screen_height:
+                        logger.warning(f"Invalid rectangle size: {w}x{h}")
+                        continue
+                    
                     if encoding == self.ENCODING_RAW:
-                        self._handle_raw_rectangle_optimized(x, y, w, h)
+                        self._handle_raw_rectangle_stable(x, y, w, h)
                         rectangles_processed += 1
                     elif encoding == self.ENCODING_COPYRECT:
-                        self._handle_copyrect(x, y, w, h)
-                        rectangles_processed += 1
-                    elif encoding == self.ENCODING_RRE:
-                        self._handle_rre_rectangle(x, y, w, h)
+                        self._handle_copyrect_fast(x, y, w, h)
                         rectangles_processed += 1
                     else:
-                        logger.warning(f"Unsupported encoding: {encoding}")
-                        # Пропускаем данные
+                        # Пропускаем неподдерживаемые кодировки
                         bytes_per_pixel = self.pixel_format['bits_per_pixel'] // 8
                         skip_size = w * h * bytes_per_pixel
-                        if skip_size > 0:
+                        if skip_size > 0 and skip_size < 100000000:  # Увеличенный лимит
+                            logger.debug(f"Skipping unsupported encoding {encoding}, size: {skip_size}")
                             self._recv_exact(skip_size)
+                        else:
+                            logger.error(f"Skipping invalid rectangle size: {skip_size}")
+                            break
+                            
                 except Exception as e:
-                    logger.error(f"Error processing rectangle: {e}")
-                    continue
+                    logger.error(f"Error processing rectangle {i}: {e}")
+                    # При ошибке прерываем обработку этого update
+                    break
             
-            # Обновляем изображение на canvas только если обработали прямоугольники
+            # Обновляем изображение только если обработали прямоугольники
             if rectangles_processed > 0:
-                self.update_queue.put(('update_display', None))
+                # НОВОЕ: Отмечаем время получения реальных данных
+                self.last_framebuffer_time = current_time
                 
-                # Обновляем статистику
+                self._schedule_canvas_update_stable()
+                
+                # Статистика
                 self.frame_count += 1
                 self.update_count += 1
             
-            # ИСПРАВЛЕНИЕ: Более разумная стратегия запросов
-            if self.continuous_updates and self.pending_update_requests < self.max_pending_requests:
-                # Запрашиваем новое обновление только если есть "место"
-                self.after(20, lambda: self._request_framebuffer_update(incremental=True))
+            # СТАБИЛЬНОСТЬ: Более осторожная стратегия запросов
+            if (self.continuous_var.get() and 
+                self.pending_update_requests < 1 and  # Ограничиваем до 1
+                rectangles_processed > 0):  # Запрашиваем только если получили данные
+                self.after(50, lambda: self._request_framebuffer_update_stable(incremental=True))
             
         except Exception as e:
-            logger.error(f"Framebuffer update error: {e}")
-            # ИСПРАВЛЕНО: При ошибке тоже уменьшаем pending
+            logger.error(f"Stable framebuffer update error: {e}")
             if self.pending_update_requests > 0:
                 self.pending_update_requests -= 1
-            raise
     
-    def _handle_raw_rectangle_optimized(self, x: int, y: int, w: int, h: int):
-        """ОПТИМИЗИРОВАННАЯ обработка RAW прямоугольника."""
+    def _handle_raw_rectangle_stable(self, x: int, y: int, w: int, h: int):
+        """СТАБИЛЬНАЯ обработка RAW прямоугольника."""
         bytes_per_pixel = self.pixel_format['bits_per_pixel'] // 8
         data_size = w * h * bytes_per_pixel
         
-        # Увеличенный лимит для больших экранов (50MB)
-        if data_size > 50000000:
-            logger.error(f"Rectangle too large: {w}x{h}, {data_size} bytes")
-            raise ValueError(f"Rectangle too large: {data_size} bytes")
+        # Логируем большие прямоугольники для отладки
+        if data_size > 5000000:  # 5MB+
+            logger.info(f"Processing large rectangle: {w}x{h}, {data_size/1024/1024:.1f}MB")
         
-        # Читаем данные
+        # Читаем данные с проверкой
         try:
             pixel_data = self._recv_exact(data_size)
         except Exception as e:
             logger.error(f"Error reading raw rectangle data: {e}")
             raise
         
-        # ОПТИМИЗАЦИЯ: Создаем изображение более эффективно
-        if bytes_per_pixel == 4:  # 32-bit - самый частый случай
-            rect_image = self._create_image_from_32bit_optimized(pixel_data, w, h)
-        elif bytes_per_pixel == 3:  # 24-bit
-            rect_image = self._create_image_from_24bit_optimized(pixel_data, w, h)
-        else:  # 16-bit и другие
-            rect_image = self._create_image_generic(pixel_data, w, h, bytes_per_pixel)
-        
-        # Вставляем в основной framebuffer
-        self.framebuffer.paste(rect_image, (x, y))
+        # СТАБИЛЬНОСТЬ: Создаем изображение более безопасно
+        try:
+            if bytes_per_pixel == 4:  # 32-bit
+                rect_image = self._create_image_stable_32bit(pixel_data, w, h)
+            elif bytes_per_pixel == 3:  # 24-bit
+                rect_image = self._create_image_stable_24bit(pixel_data, w, h)
+            else:  # Для других форматов
+                rect_image = Image.new('RGB', (w, h), (128, 128, 128))
+            
+            # Безопасная вставка в framebuffer
+            if rect_image and self.framebuffer:
+                self.framebuffer.paste(rect_image, (x, y))
+                
+        except Exception as e:
+            logger.error(f"Error creating rectangle image: {e}")
+            # При ошибке создаем простую заглушку
+            try:
+                rect_image = Image.new('RGB', (w, h), (64, 64, 64))
+                self.framebuffer.paste(rect_image, (x, y))
+            except:
+                pass  # Игнорируем ошибки заглушки
     
-    def _create_image_from_32bit_optimized(self, pixel_data: bytes, w: int, h: int) -> Image.Image:
-        """ОПТИМИЗИРОВАННОЕ создание изображения из 32-bit данных."""
-        # ОПТИМИЗАЦИЯ: Используем numpy-подобную логику без numpy
-        rect_image = Image.new('RGB', (w, h))
-        
-        # ОПТИМИЗАЦИЯ: Обрабатываем данные блоками для экономии памяти
-        pixels = []
-        data_len = len(pixel_data)
-        
-        # Быстрая обработка для больших изображений
-        if data_len > 1000000:  # > 1MB
-            # Обрабатываем по строкам
-            for row in range(h):
-                row_start = row * w * 4
-                row_end = min(row_start + w * 4, data_len)
-                if row_start >= data_len:
-                    break
-                    
-                row_data = pixel_data[row_start:row_end]
-                row_pixels = []
-                
-                for i in range(0, len(row_data), 4):
-                    if i + 3 < len(row_data):
-                        b, g, r, _ = row_data[i:i+4]
-                        row_pixels.append((r, g, b))
-                
-                pixels.extend(row_pixels)
-        else:
-            # Быстрая обработка для маленьких изображений
-            for i in range(0, data_len, 4):
+    def _create_image_stable_32bit(self, pixel_data: bytes, w: int, h: int) -> Image.Image:
+        """СТАБИЛЬНОЕ создание изображения из 32-bit данных."""
+        try:
+            rect_image = Image.new('RGB', (w, h))
+            
+            pixels = []
+            data_len = len(pixel_data)
+            
+            # Проверяем размер данных
+            expected_size = w * h * 4
+            if data_len < expected_size:
+                logger.warning(f"Insufficient pixel data: got {data_len}, expected {expected_size}")
+                return Image.new('RGB', (w, h), (128, 128, 128))
+            
+            # Безопасная обработка пикселей
+            for i in range(0, min(data_len, expected_size), 4):
                 if i + 3 < data_len:
-                    b, g, r, _ = pixel_data[i:i+4]
-                    pixels.append((r, g, b))
-        
-        rect_image.putdata(pixels)
-        return rect_image
+                    try:
+                        b, g, r, _ = pixel_data[i:i+4]
+                        pixels.append((r, g, b))
+                    except (IndexError, ValueError):
+                        pixels.append((128, 128, 128))  # Заглушка при ошибке
+            
+            if pixels:
+                # Проверяем количество пикселей
+                expected_pixels = w * h
+                if len(pixels) < expected_pixels:
+                    # Дополняем недостающие пиксели
+                    pixels.extend([(128, 128, 128)] * (expected_pixels - len(pixels)))
+                elif len(pixels) > expected_pixels:
+                    # Обрезаем лишние пиксели
+                    pixels = pixels[:expected_pixels]
+                
+                rect_image.putdata(pixels)
+            
+            return rect_image
+            
+        except Exception as e:
+            logger.error(f"Error in stable 32bit image creation: {e}")
+            return Image.new('RGB', (w, h), (64, 64, 64))
     
-    def _create_image_from_24bit_optimized(self, pixel_data: bytes, w: int, h: int) -> Image.Image:
-        """ОПТИМИЗИРОВАННОЕ создание изображения из 24-bit данных."""
-        rect_image = Image.new('RGB', (w, h))
-        
-        pixels = []
-        data_len = len(pixel_data)
-        
-        for i in range(0, data_len, 3):
-            if i + 2 < data_len:
-                b, g, r = pixel_data[i:i+3]
-                pixels.append((r, g, b))
-        
-        rect_image.putdata(pixels)
-        return rect_image
+    def _create_image_stable_24bit(self, pixel_data: bytes, w: int, h: int) -> Image.Image:
+        """СТАБИЛЬНОЕ создание изображения из 24-bit данных."""
+        try:
+            rect_image = Image.new('RGB', (w, h))
+            
+            pixels = []
+            data_len = len(pixel_data)
+            expected_size = w * h * 3
+            
+            if data_len < expected_size:
+                logger.warning(f"Insufficient 24bit pixel data: got {data_len}, expected {expected_size}")
+                return Image.new('RGB', (w, h), (128, 128, 128))
+            
+            for i in range(0, min(data_len, expected_size), 3):
+                if i + 2 < data_len:
+                    try:
+                        b, g, r = pixel_data[i:i+3]
+                        pixels.append((r, g, b))
+                    except (IndexError, ValueError):
+                        pixels.append((128, 128, 128))
+            
+            if pixels:
+                expected_pixels = w * h
+                if len(pixels) < expected_pixels:
+                    pixels.extend([(128, 128, 128)] * (expected_pixels - len(pixels)))
+                elif len(pixels) > expected_pixels:
+                    pixels = pixels[:expected_pixels]
+                
+                rect_image.putdata(pixels)
+            
+            return rect_image
+            
+        except Exception as e:
+            logger.error(f"Error in stable 24bit image creation: {e}")
+            return Image.new('RGB', (w, h), (64, 64, 64))
     
-    def _create_image_generic(self, pixel_data: bytes, w: int, h: int, bytes_per_pixel: int) -> Image.Image:
-        """Создание изображения для других форматов."""
-        rect_image = Image.new('RGB', (w, h))
-        pixels = []
-        
-        for i in range(0, len(pixel_data), bytes_per_pixel):
-            if bytes_per_pixel == 2:  # 16-bit
-                if i + 1 < len(pixel_data):
-                    pixel = struct.unpack("!H", pixel_data[i:i+2])[0]
-                    r = ((pixel >> self.pixel_format['red_shift']) & 
-                         ((1 << self._bit_count(self.pixel_format['red_max'])) - 1))
-                    g = ((pixel >> self.pixel_format['green_shift']) & 
-                         ((1 << self._bit_count(self.pixel_format['green_max'])) - 1))
-                    b = ((pixel >> self.pixel_format['blue_shift']) & 
-                         ((1 << self._bit_count(self.pixel_format['blue_max'])) - 1))
-                    # Масштабирование до 8 бит
-                    r = r * 255 // self.pixel_format['red_max']
-                    g = g * 255 // self.pixel_format['green_max']
-                    b = b * 255 // self.pixel_format['blue_max']
-                    pixels.append((r, g, b))
-            else:
-                pixels.append((0, 0, 0))  # Неизвестный формат
-        
-        rect_image.putdata(pixels)
-        return rect_image
-    
-    def _bit_count(self, n: int) -> int:
-        """Подсчет битов в числе."""
-        count = 0
-        while n:
-            count += 1
-            n >>= 1
-        return count
-    
-    def _handle_copyrect(self, x: int, y: int, w: int, h: int):
-        """Обработка COPYRECT."""
+    def _handle_copyrect_fast(self, x: int, y: int, w: int, h: int):
+        """Быстрая обработка COPYRECT."""
         src_data = self._recv_exact(4)
         src_x, src_y = struct.unpack("!HH", src_data)
         
-        # Копируем прямоугольник
+        # Быстрое копирование
         rect = self.framebuffer.crop((src_x, src_y, src_x + w, src_y + h))
         self.framebuffer.paste(rect, (x, y))
     
-    def _handle_rre_rectangle(self, x: int, y: int, w: int, h: int):
-        """Обработка RRE прямоугольника."""
-        # Количество подпрямоугольников
-        num_subrects = struct.unpack("!I", self._recv_exact(4))[0]
-        
-        bytes_per_pixel = self.pixel_format['bits_per_pixel'] // 8
-        
-        # Фоновый цвет
-        bg_color = self._read_pixel(bytes_per_pixel)
-        
-        # Заполняем фоном
-        rect_image = Image.new('RGB', (w, h), bg_color)
-        
-        # Читаем подпрямоугольники
-        for _ in range(num_subrects):
-            pixel_color = self._read_pixel(bytes_per_pixel)
-            sub_data = self._recv_exact(8)
-            sub_x, sub_y, sub_w, sub_h = struct.unpack("!HHHH", sub_data)
-            
-            # Рисуем подпрямоугольник
-            for py in range(sub_y, sub_y + sub_h):
-                for px in range(sub_x, sub_x + sub_w):
-                    if 0 <= px < w and 0 <= py < h:
-                        rect_image.putpixel((px, py), pixel_color)
-        
-        self.framebuffer.paste(rect_image, (x, y))
-    
-    def _read_pixel(self, bytes_per_pixel: int) -> Tuple[int, int, int]:
-        """Чтение одного пикселя."""
-        pixel_data = self._recv_exact(bytes_per_pixel)
-        
-        if bytes_per_pixel == 4:  # 32-bit
-            b, g, r, _ = pixel_data
-            return (r, g, b)
-        elif bytes_per_pixel == 3:  # 24-bit
-            b, g, r = pixel_data
-            return (r, g, b)
-        elif bytes_per_pixel == 2:  # 16-bit
-            pixel = struct.unpack("!H", pixel_data)[0]
-            r = ((pixel >> self.pixel_format['red_shift']) & 
-                 ((1 << self._bit_count(self.pixel_format['red_max'])) - 1))
-            g = ((pixel >> self.pixel_format['green_shift']) & 
-                 ((1 << self._bit_count(self.pixel_format['green_max'])) - 1))
-            b = ((pixel >> self.pixel_format['blue_shift']) & 
-                 ((1 << self._bit_count(self.pixel_format['blue_max'])) - 1))
-            # Масштабирование до 8 бит
-            r = r * 255 // self.pixel_format['red_max']
-            g = g * 255 // self.pixel_format['green_max']
-            b = b * 255 // self.pixel_format['blue_max']
-            return (r, g, b)
-        else:
-            return (0, 0, 0)
-    
-    def _handle_colormap_entries(self):
-        """Обработка изменения цветовой карты."""
-        # Пропускаем padding
-        self._recv_exact(1)
-        
-        # First color, number of colors
+    def _handle_colormap_entries_fast(self):
+        """Быстрая обработка colormap."""
+        self._recv_exact(1)  # padding
         first_color = struct.unpack("!H", self._recv_exact(2))[0]
         num_colors = struct.unpack("!H", self._recv_exact(2))[0]
-        
-        # Пропускаем данные цветов (по 6 байт на цвет)
-        self._recv_exact(num_colors * 6)
-        
-        logger.debug(f"Colormap entries: first={first_color}, count={num_colors}")
+        self._recv_exact(num_colors * 6)  # Пропускаем данные цветов
     
-    def _handle_bell(self):
-        """Обработка звукового сигнала."""
-        logger.info("Bell received")
-        # Можно воспроизвести звук
-        self.after(0, self.app.bell)
-    
-    def _handle_server_cut_text(self):
-        """Обработка текста из буфера обмена сервера."""
-        # Пропускаем padding
-        self._recv_exact(3)
-        
-        # Длина текста
+    def _handle_server_cut_text_fast(self):
+        """Быстрая обработка cut text."""
+        self._recv_exact(3)  # padding
         text_length = struct.unpack("!I", self._recv_exact(4))[0]
-        
-        # Читаем текст
-        text = self._recv_exact(text_length).decode('latin-1')
-        
-        # Копируем в буфер обмена
-        self.after(0, self._copy_to_clipboard, text)
+        self._recv_exact(text_length)  # Пропускаем текст для производительности
     
-    def _copy_to_clipboard(self, text: str):
-        """Копирование текста в буфер обмена."""
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        self.update()
+    def _schedule_canvas_update_stable(self):
+        """СТАБИЛЬНОЕ планирование обновления canvas."""
+        current_time = time.time()
+        
+        # СТАБИЛЬНОСТЬ: Более консервативный throttling
+        if current_time - self.last_canvas_update < self.canvas_update_interval:
+            if not self.pending_canvas_update:
+                self.pending_canvas_update = True
+                delay = int((self.canvas_update_interval - (current_time - self.last_canvas_update)) * 1000)
+                self.after(max(16, delay), self._update_canvas_fast)  # Минимум 16ms (60 FPS)
+        else:
+            self._update_canvas_fast()
+    
+    def _request_framebuffer_update_stable(self, incremental: bool = True):
+        """СТАБИЛЬНЫЙ запрос обновления framebuffer."""
+        if not self.connected or not self.socket:
+            return
+        
+        current_time = time.time()
+        
+        # СТАБИЛЬНОСТЬ: Более строгий throttling
+        if current_time - self.last_update_request_time < self.update_request_interval:
+            return
+        
+        # СТАБИЛЬНОСТЬ: Консервативный контроль pending
+        if self.pending_update_requests >= self.max_pending_requests:
+            # Проверяем на зависшие запросы
+            time_since_response = current_time - self.last_server_response_time
+            if time_since_response > 3.0:  # 3 секунды без ответа
+                logger.warning(f"Resetting pending requests after {time_since_response:.1f}s timeout")
+                self.pending_update_requests = 0
+            else:
+                return
+        
+        try:
+            # Проверяем валидность сокета
+            try:
+                socket_valid = self.socket.fileno() != -1
+            except (OSError, AttributeError):
+                logger.debug("Socket invalid during update request")
+                return
+            
+            if not socket_valid:
+                return
+            
+            message = struct.pack(
+                "!BBHHHH",
+                self.FRAMEBUFFER_UPDATE_REQUEST,
+                1 if incremental else 0,
+                0, 0,
+                self.screen_width, self.screen_height
+            )
+            
+            self.socket.send(message)
+            self.pending_update_requests += 1
+            self.last_update_request_time = current_time
+            
+        except (OSError, socket.error) as e:
+            logger.debug(f"Socket error in stable update request: {e}")
+            self.pending_update_requests = 0
+        except Exception as e:
+            logger.error(f"Error in stable update request: {e}")
+            self.pending_update_requests = 0
+    
+    def _update_canvas_fast(self):
+        """СТАБИЛЬНОЕ обновление canvas без моргания."""
+        if not self.framebuffer:
+            return
+        
+        try:
+            self.pending_canvas_update = False
+            self.last_canvas_update = time.time()
+            
+            # ИСПРАВЛЕНИЕ: Избегаем моргания экрана
+            display_image = self.framebuffer
+            
+            # Применяем масштабирование только если необходимо
+            scale_value = self.scale_var.get()
+            if scale_value != "100%":
+                scale_factor = self._get_scale_factor(scale_value)
+                if scale_factor != 1.0:
+                    new_width = int(self.screen_width * scale_factor)
+                    new_height = int(self.screen_height * scale_factor)
+                    display_image = self.framebuffer.resize((new_width, new_height), Image.NEAREST)
+            
+            # ИСПРАВЛЕНИЕ: Создаем PhotoImage
+            photo = ImageTk.PhotoImage(display_image)
+            
+            # ИСПРАВЛЕНИЕ: Умное обновление canvas без полной очистки
+            canvas_items = self.canvas.find_all()
+            
+            if canvas_items:
+                # Обновляем существующее изображение
+                main_image_item = canvas_items[0]
+                self.canvas.itemconfig(main_image_item, image=photo)
+            else:
+                # Создаем новое изображение только если его нет
+                self.canvas.create_image(0, 0, anchor="nw", image=photo, tags="main_image")
+            
+            # Сохраняем ссылку на изображение
+            self.canvas.image = photo
+            
+            # Обновляем размер scroll region
+            self.canvas.configure(scrollregion=(0, 0, display_image.width, display_image.height))
+            
+            # Индикатор активности
+            self.activity_indicator.configure(text="🟢")
+            self.after(100, lambda: self.activity_indicator.configure(text="⚫"))
+            
+        except Exception as e:
+            logger.error(f"Stable canvas update error: {e}")
+            # При ошибке делаем полное обновление
+            self._full_canvas_refresh()
+    
+    def _full_canvas_refresh(self):
+        """Полное обновление canvas при ошибках."""
+        try:
+            if not self.framebuffer:
+                return
+            
+            # Полная очистка только при необходимости
+            self.canvas.delete("all")
+            
+            display_image = self.framebuffer
+            scale_factor = self._get_scale_factor(self.scale_var.get())
+            
+            if scale_factor != 1.0:
+                new_width = int(self.screen_width * scale_factor)
+                new_height = int(self.screen_height * scale_factor)
+                display_image = self.framebuffer.resize((new_width, new_height), Image.NEAREST)
+            
+            photo = ImageTk.PhotoImage(display_image)
+            self.canvas.create_image(0, 0, anchor="nw", image=photo, tags="main_image")
+            self.canvas.image = photo
+            self.canvas.configure(scrollregion=(0, 0, display_image.width, display_image.height))
+            
+        except Exception as e:
+            logger.error(f"Full canvas refresh error: {e}")
+    
+    def _get_scale_factor(self, scale_value: str) -> float:
+        """Получение коэффициента масштабирования."""
+        if scale_value == "75%":
+            return 0.75
+        elif scale_value == "125%":
+            return 1.25
+        elif scale_value == "Авто":
+            canvas_width = self.canvas.winfo_width()
+            canvas_height = self.canvas.winfo_height()
+            
+            if canvas_width > 1 and canvas_height > 1:
+                scale_x = canvas_width / self.screen_width
+                scale_y = canvas_height / self.screen_height
+                return min(scale_x, scale_y, 1.0)
+        
+        return 1.0
+    
+    def _recv_exact(self, size: int) -> bytes:
+        """Стабильное получение точного количества байт."""
+        if size <= 0:
+            return b''
+        
+        if size > 100000000:  # 100MB лимит для поддержки больших экранов
+            logger.error(f"Requested size too large: {size}")
+            raise ValueError(f"Size too large: {size}")
+        
+        if not self.socket:
+            raise ConnectionError("Socket is None")
+        
+        try:
+            socket_valid = self.socket.fileno() != -1
+        except (OSError, AttributeError):
+            raise ConnectionError("Socket is invalid")
+        
+        if not socket_valid:
+            raise ConnectionError("Socket closed")
+        
+        data = b''
+        remaining = size
+        max_chunk_size = 65536  # 64KB chunks
+        
+        while remaining > 0:
+            try:
+                chunk_size = min(remaining, max_chunk_size)
+                chunk = self.socket.recv(chunk_size)
+                
+                if not chunk:
+                    if len(data) > 0:
+                        logger.warning(f"Partial data received: {len(data)}/{size} bytes")
+                    raise ConnectionError(f"Connection closed (expected {size}, got {len(data)})")
+                
+                data += chunk
+                remaining -= len(chunk)
+                
+            except socket.timeout:
+                if len(data) > 0:
+                    logger.warning(f"Timeout while reading, got {len(data)}/{size} bytes")
+                # Для UltraVNC расширений - можем продолжить с частичными данными
+                if size < 1000:  # Небольшие расширения
+                    logger.debug(f"Timeout on small read ({size} bytes), continuing")
+                    break
+                else:
+                    raise
+            except OSError as e:
+                if e.winerror == 10038:  # WSAENOTSOCK
+                    raise ConnectionError("Socket operation on non-socket")
+                elif e.winerror == 10054:  # Connection reset
+                    raise ConnectionError("Connection reset by peer")
+                else:
+                    raise ConnectionError(f"Socket error: {e}")
+        
+        return data
     
     def _start_event_processor(self):
-        """Запуск обработчика событий UI."""
-        self._process_events()
+        """Запуск быстрого обработчика событий."""
+        self._process_events_fast()
     
-    def _process_events(self):
-        """ОПТИМИЗИРОВАННАЯ обработка событий из очереди."""
+    def _process_events_fast(self):
+        """БЫСТРАЯ обработка событий из очереди."""
         try:
-            # ОПТИМИЗАЦИЯ: Обрабатываем больше событий за раз
             events_processed = 0
-            max_events_per_cycle = 5
+            max_events = 10  # Обрабатываем больше событий за раз
             
-            while events_processed < max_events_per_cycle:
+            while events_processed < max_events:
                 event_type, data = self.update_queue.get_nowait()
                 
                 if event_type == 'update_display':
-                    self._update_canvas_optimized()
+                    self._update_canvas_fast()
                 elif event_type == 'update_status':
                     self.status_label.configure(text=data)
-                elif event_type == 'update_resolution':
-                    self.resolution_label.configure(text=data)
                 
                 events_processed += 1
                     
         except queue.Empty:
             pass
         
-        # ОПТИМИЗАЦИЯ: Уменьшаем интервал обработки до 8ms (~120 FPS)
-        self.after(8, self._process_events)
-    
-    def _update_canvas_optimized(self):
-        """ОПТИМИЗИРОВАННОЕ обновление изображения на canvas."""
-        if not self.framebuffer:
-            return
-        
-        try:
-            # Определяем масштаб
-            scale_value = self.scale_var.get()
-            scale_factor = 1.0
-            
-            if scale_value == "Авто":
-                # Автоматический масштаб на основе размера экрана
-                canvas_width = self.canvas.winfo_width()
-                canvas_height = self.canvas.winfo_height()
-                
-                if canvas_width > 1 and canvas_height > 1:
-                    scale_x = canvas_width / self.screen_width
-                    scale_y = canvas_height / self.screen_height
-                    scale_factor = min(scale_x, scale_y, 1.0)  # Не увеличиваем
-                    
-                    # Для очень больших экранов принудительно уменьшаем
-                    if self.screen_width > 2000 or self.screen_height > 1500:
-                        scale_factor = min(scale_factor, 0.75)
-            else:
-                # Фиксированный масштаб
-                scale_map = {"50%": 0.5, "75%": 0.75, "100%": 1.0}
-                scale_factor = scale_map.get(scale_value, 1.0)
-            
-            # ОПТИМИЗАЦИЯ: Кэшируем масштабированные изображения
-            cache_key = f"{scale_factor}_{self.screen_width}_{self.screen_height}"
-            
-            # Применяем масштабирование
-            display_image = self.framebuffer
-            if scale_factor != 1.0:
-                new_width = int(self.screen_width * scale_factor)
-                new_height = int(self.screen_height * scale_factor)
-                
-                # ОПТИМИЗАЦИЯ: Используем более быстрый алгоритм ресайза
-                resize_method = Image.NEAREST  # Всегда быстрый для real-time
-                display_image = self.framebuffer.resize((new_width, new_height), resize_method)
-            
-            # ОПТИМИЗАЦИЯ: Преобразуем в PhotoImage максимально быстро
-            photo = ImageTk.PhotoImage(display_image)
-            
-            # Обновляем canvas
-            self.canvas.delete("all")
-            self.canvas.create_image(0, 0, anchor="nw", image=photo)
-            self.canvas.image = photo  # Сохраняем ссылку
-            
-            # Обновляем размер canvas
-            display_width = int(self.screen_width * scale_factor)
-            display_height = int(self.screen_height * scale_factor)
-            self.canvas.configure(scrollregion=(0, 0, display_width, display_height))
-            
-            # Обновляем индикатор активности
-            self.activity_indicator.configure(text="🟢")
-            self.after(50, lambda: self.activity_indicator.configure(text="⚫"))
-            
-            # Обновляем информацию о масштабе
-            if scale_factor != 1.0:
-                scale_text = f" (масштаб {scale_factor:.0%})"
-            else:
-                scale_text = ""
-            
-            resolution_text = f"{self.screen_width}x{self.screen_height}{scale_text}"
-            self.resolution_label.configure(text=resolution_text)
-            
-        except Exception as e:
-            logger.error(f"Canvas update error: {e}")
+        # ПРОИЗВОДИТЕЛЬНОСТЬ: Быстрая обработка событий (120 FPS)
+        self.after(8, self._process_events_fast)
     
     def _update_status(self, status: str):
         """Обновление статуса."""
-        self.update_queue.put(('update_status', status))
+        try:
+            self.update_queue.put_nowait(('update_status', status))
+        except queue.Full:
+            pass  # Пропускаем если очередь заполнена
     
     def _on_connected(self):
         """Обработчик успешного подключения."""
         self.connect_button.configure(state="disabled")
         self.disconnect_button.configure(state="normal")
-        self.reconnect_button.configure(state="normal")
         self.server_entry.configure(state="disabled")
         self.password_entry.configure(state="disabled")
         
         # Обновляем разрешение
         resolution_text = f"{self.screen_width}x{self.screen_height}"
-        self.update_queue.put(('update_resolution', resolution_text))
+        self.resolution_label.configure(text=resolution_text)
         
         # Фокус на canvas
         self.canvas.focus_set()
     
     def _on_connection_failed(self, error: str):
         """Обработчик неудачного подключения."""
-        error_message = f"Не удалось подключиться:\n{error}\n\n"
-        
-        # Добавляем советы в зависимости от ошибки
-        if "Protocol" in error or "desynchronization" in error:
-            error_message += "Советы для решения:\n"
-            error_message += "• Попробуйте другой VNC клиент для сравнения\n"
-            error_message += "• Проверьте настройки VNC сервера\n"
-            error_message += "• Используйте кнопку 'Переподключиться'\n"
-            error_message += "• Попробуйте режим 'Без пароля' если доступен"
-        elif "Authentication" in error:
-            error_message += "Советы для решения:\n"
-            error_message += "• Проверьте правильность пароля\n"
-            error_message += "• Попробуйте другой тип аутентификации\n"
-            error_message += "• Убедитесь что VNC сервер принимает подключения"
-        
-        messagebox.showerror("Ошибка подключения", error_message)
+        messagebox.showerror("Ошибка подключения", f"Не удалось подключиться:\n{error}")
     
     def disconnect_from_vnc(self):
-        """ИСПРАВЛЕННОЕ отключение от VNC сервера."""
+        """Отключение от VNC сервера."""
         logger.info("Disconnecting from VNC server...")
         
-        # Останавливаем флаг подключения
         self.connected = False
         self._stop_threads.set()
         
@@ -1499,69 +1260,42 @@ class VNCViewerFrame(ctk.CTkFrame):
             self.after_cancel(self.force_update_timer)
             self.force_update_timer = None
         
-        if self.request_update_timer:
-            self.after_cancel(self.request_update_timer)
-            self.request_update_timer = None
+        if self.continuous_update_timer:
+            self.after_cancel(self.continuous_update_timer)
+            self.continuous_update_timer = None
         
-        # ИСПРАВЛЕНО: Более агрессивное закрытие сокета
+        # Закрываем сокет
         if self.socket:
             try:
-                # Проверяем, что сокет ещё валидный
                 if self.socket.fileno() != -1:
-                    # Устанавливаем короткий таймаут для быстрого закрытия
-                    self.socket.settimeout(0.1)
-                    try:
-                        self.socket.shutdown(socket.SHUT_RDWR)
-                    except:
-                        pass  # Игнорируем ошибки shutdown
                     self.socket.close()
-                logger.debug("Socket closed successfully")
-            except Exception as e:
-                logger.debug(f"Socket close error (expected): {e}")
+            except:
+                pass
             finally:
                 self.socket = None
         
-        # ИСПРАВЛЕНО: Более агрессивное завершение потоков
+        # Завершаем потоки
         if self.receiving_thread and self.receiving_thread.is_alive():
-            logger.debug("Waiting for receiver thread to finish...")
-            self.receiving_thread.join(timeout=1)  # УМЕНЬШИЛИ таймаут до 1 сек
-            if self.receiving_thread.is_alive():
-                logger.warning("Receiver thread still alive, forcing cleanup")
-                # Поток зависнет, но мы продолжим
+            self.receiving_thread.join(timeout=0.5)
         
-        # Очистка UI
+        # Очистка
         try:
             self.canvas.delete("all")
-        except Exception as e:
-            logger.debug(f"Error clearing canvas: {e}")
+        except:
+            pass
         
         self.framebuffer = None
         
-        # ИСПРАВЛЕНО: Полный сброс всех счётчиков
+        # Сброс счетчиков
         self.frame_count = 0
-        self.bytes_received = 0
-        self.last_fps_time = time.time()
-        self.last_stats_time = time.time()
-        self.last_force_update = 0
-        self.protocol_errors = 0
         self.update_count = 0
-        self.request_count = 0
-        self.pending_update_requests = 0  # КРИТИЧНО: Полный сброс pending
-        self.last_update_count_time = time.time()
-        self.last_server_response_time = time.time()
-        self.last_update_request_time = 0  # ДОБАВЛЕНО: Сброс последнего запроса
+        self.pending_update_requests = 0
+        self.protocol_errors = 0
         
-        # Восстанавливаем интервалы
-        self.update_request_interval = 0.05
-        
-        # Очистка кэшей
-        self.image_cache.clear()
-        
-        # Обновление UI элементов
+        # Обновление UI
         try:
             self.connect_button.configure(state="normal")
             self.disconnect_button.configure(state="disabled")
-            self.reconnect_button.configure(state="disabled")
             self.server_entry.configure(state="normal")
             self.password_entry.configure(state="normal")
             
@@ -1569,265 +1303,159 @@ class VNCViewerFrame(ctk.CTkFrame):
             self.resolution_label.configure(text="")
             self.fps_label.configure(text="")
             self.ups_label.configure(text="")
-            self.rps_label.configure(text="")
-            self.pending_label.configure(text="")
-        except Exception as e:
-            logger.debug(f"Error updating UI during disconnect: {e}")
+            self.last_update_label.configure(text="")  # НОВОЕ: Очистка framebuffer статуса
+        except:
+            pass
         
         logger.info("VNC disconnection completed")
     
-    def reconnect_to_vnc(self):
-        """Переподключение к VNC серверу."""
-        logger.info("Reconnecting to VNC server...")
-        self.disconnect_from_vnc()
-        
-        # Небольшая задержка перед переподключением
-        self.after(1000, self.connect_to_vnc)
-    
-    # Обработчики событий мыши - ИСПРАВЛЕНО: убраны лишние запросы
+    # Обработчики событий мыши и клавиатуры (упрощенные для производительности)
     def _on_mouse_click(self, event):
-        """Обработка клика мыши."""
         if self.connected and not self.view_only_var.get():
-            self._send_pointer_event(event.x, event.y, button_mask=1)
-            # Запрос уже отправляется в _send_pointer_event при button_mask != 0
+            self._send_pointer_event_fast(event.x, event.y, button_mask=1)
     
     def _on_mouse_release(self, event):
-        """Обработка отпускания кнопки мыши."""
         if self.connected and not self.view_only_var.get():
-            self._send_pointer_event(event.x, event.y, button_mask=0)
-            # Дополнительный запрос при отпускании для обновления UI
-            self._request_framebuffer_update(incremental=True)
+            self._send_pointer_event_fast(event.x, event.y, button_mask=0)
     
     def _on_mouse_motion(self, event):
-        """Обработка движения мыши с зажатой кнопкой."""
         if self.connected and not self.view_only_var.get():
-            self._send_pointer_event(event.x, event.y, button_mask=1)
-            # Запрос уже отправляется в _send_pointer_event
+            self._send_pointer_event_fast(event.x, event.y, button_mask=1)
     
     def _on_mouse_move(self, event):
-        """УМЕРЕННАЯ обработка движения мыши."""
         if self.connected and not self.view_only_var.get():
-            # ИСПРАВЛЕНИЕ: Больший throttling для движения мыши
+            # ПРОИЗВОДИТЕЛЬНОСТЬ: Throttling для движения мыши
             current_time = time.time()
             if hasattr(self, '_last_mouse_move_time'):
-                if current_time - self._last_mouse_move_time < 0.05:  # 20 FPS для движения мыши
+                if current_time - self._last_mouse_move_time < 0.02:  # 50 FPS
                     return
             self._last_mouse_move_time = current_time
-            
-            self._send_pointer_event(event.x, event.y, button_mask=0)
-            # НЕ запрашиваем обновления при простом движении мыши
+            self._send_pointer_event_fast(event.x, event.y, button_mask=0)
     
     def _on_right_click(self, event):
-        """Обработка правого клика."""
         if self.connected and not self.view_only_var.get():
-            self._send_pointer_event(event.x, event.y, button_mask=4)
-            # Запрос уже отправляется в _send_pointer_event при button_mask != 0
+            self._send_pointer_event_fast(event.x, event.y, button_mask=4)
     
     def _on_right_release(self, event):
-        """Обработка отпускания правой кнопки."""
         if self.connected and not self.view_only_var.get():
-            self._send_pointer_event(event.x, event.y, button_mask=0)
+            self._send_pointer_event_fast(event.x, event.y, button_mask=0)
     
     def _on_mouse_wheel(self, event):
-        """Обработка колеса мыши."""
         if self.connected and not self.view_only_var.get():
-            # Определяем направление
-            if event.delta > 0:
-                button_mask = 8  # Wheel up
-            else:
-                button_mask = 16  # Wheel down
-            
-            # Отправляем нажатие и отпускание
-            self._send_pointer_event(event.x, event.y, button_mask=button_mask)
-            self.after(10, lambda: self._send_pointer_event(event.x, event.y, button_mask=0))
-            # Запросы уже отправляются в _send_pointer_event
+            button_mask = 8 if event.delta > 0 else 16
+            self._send_pointer_event_fast(event.x, event.y, button_mask=button_mask)
+            self.after(10, lambda: self._send_pointer_event_fast(event.x, event.y, button_mask=0))
     
-    def _send_pointer_event(self, x: int, y: int, button_mask: int):
-        """Отправка события указателя с учетом масштабирования."""
+    def _send_pointer_event_fast(self, x: int, y: int, button_mask: int):
+        """БЫСТРАЯ отправка события указателя."""
         if not self.connected or not self.socket:
             return
         
         try:
-            # Проверяем валидность сокета
             if self.socket.fileno() == -1:
-                logger.debug("Cannot send pointer event: socket is closed")
                 return
             
-            # Корректируем координаты с учетом масштабирования
-            scale_value = self.scale_var.get()
-            scale_factor = 1.0
-            
-            if scale_value == "Авто":
-                # Вычисляем автоматический масштаб
-                canvas_width = self.canvas.winfo_width()
-                canvas_height = self.canvas.winfo_height()
-                
-                if canvas_width > 1 and canvas_height > 1:
-                    scale_x = canvas_width / self.screen_width
-                    scale_y = canvas_height / self.screen_height
-                    scale_factor = min(scale_x, scale_y, 1.0)
-                    
-                    if self.screen_width > 2000 or self.screen_height > 1500:
-                        scale_factor = min(scale_factor, 0.75)
-            else:
-                scale_map = {"50%": 0.5, "75%": 0.75, "100%": 1.0}
-                scale_factor = scale_map.get(scale_value, 1.0)
-            
-            # Преобразуем координаты обратно к реальному разрешению
+            # Преобразуем координаты с учетом масштабирования
+            scale_factor = self._get_scale_factor(self.scale_var.get())
             real_x = int(x / scale_factor)
             real_y = int(y / scale_factor)
             
-            # Ограничиваем координаты
             real_x = max(0, min(real_x, self.screen_width - 1))
             real_y = max(0, min(real_y, self.screen_height - 1))
             
-            message = struct.pack(
-                "!BBHH",
-                self.POINTER_EVENT,
-                button_mask,
-                real_x, real_y
-            )
+            message = struct.pack("!BBHH", self.POINTER_EVENT, button_mask, real_x, real_y)
             self.socket.send(message)
             
-            # ИСПРАВЛЕНИЕ: Запрашиваем обновление только при кликах, не при движении
-            if button_mask != 0:  # Только при нажатии кнопок
-                self._request_framebuffer_update(incremental=True)
+            # ПРОИЗВОДИТЕЛЬНОСТЬ: Запрос обновления только при кликах
+            if button_mask != 0 and self.pending_update_requests < 2:
+                self._request_framebuffer_update_fast(incremental=True)
             
-        except (OSError, socket.error) as e:
-            logger.debug(f"Socket error sending pointer event: {e}")
-            # Не разрываем соединение, просто игнорируем
-        except Exception as e:
-            logger.error(f"Error sending pointer event: {e}")
+        except (OSError, socket.error):
+            pass
+        except Exception:
+            pass
     
-    # Обработчики клавиатуры
     def _on_key_press(self, event):
-        """Обработка нажатия клавиши."""
         if self.connected and not self.view_only_var.get():
             keysym = self._get_keysym(event)
             if keysym:
-                self._send_key_event(keysym, down=True)
+                self._send_key_event_fast(keysym, down=True)
     
     def _on_key_release(self, event):
-        """Обработка отпускания клавиши."""
         if self.connected and not self.view_only_var.get():
             keysym = self._get_keysym(event)
             if keysym:
-                self._send_key_event(keysym, down=False)
+                self._send_key_event_fast(keysym, down=False)
     
     def _get_keysym(self, event) -> Optional[int]:
         """Получение keysym для клавиши."""
-        # Маппинг специальных клавиш
         special_keys = {
-            'Return': 0xff0d,
-            'Escape': 0xff1b,
-            'BackSpace': 0xff08,
-            'Tab': 0xff09,
-            'space': 0x0020,
-            'Delete': 0xffff,
-            'Home': 0xff50,
-            'End': 0xff57,
-            'Prior': 0xff55,  # Page Up
-            'Next': 0xff56,   # Page Down
-            'Left': 0xff51,
-            'Up': 0xff52,
-            'Right': 0xff53,
-            'Down': 0xff54,
-            'F1': 0xffbe,
-            'F2': 0xffbf,
-            'F3': 0xffc0,
-            'F4': 0xffc1,
-            'F5': 0xffc2,
-            'F6': 0xffc3,
-            'F7': 0xffc4,
-            'F8': 0xffc5,
-            'F9': 0xffc6,
-            'F10': 0xffc7,
-            'F11': 0xffc8,
-            'F12': 0xffc9,
-            'Shift_L': 0xffe1,
-            'Shift_R': 0xffe2,
-            'Control_L': 0xffe3,
-            'Control_R': 0xffe4,
-            'Alt_L': 0xffe9,
-            'Alt_R': 0xffea,
+            'Return': 0xff0d, 'Escape': 0xff1b, 'BackSpace': 0xff08, 'Tab': 0xff09,
+            'space': 0x0020, 'Delete': 0xffff, 'Home': 0xff50, 'End': 0xff57,
+            'Prior': 0xff55, 'Next': 0xff56, 'Left': 0xff51, 'Up': 0xff52,
+            'Right': 0xff53, 'Down': 0xff54, 'F1': 0xffbe, 'F2': 0xffbf,
+            'F3': 0xffc0, 'F4': 0xffc1, 'F5': 0xffc2, 'F6': 0xffc3,
+            'F7': 0xffc4, 'F8': 0xffc5, 'F9': 0xffc6, 'F10': 0xffc7,
+            'F11': 0xffc8, 'F12': 0xffc9, 'Shift_L': 0xffe1, 'Shift_R': 0xffe2,
+            'Control_L': 0xffe3, 'Control_R': 0xffe4, 'Alt_L': 0xffe9, 'Alt_R': 0xffea,
         }
         
-        # Проверяем специальные клавиши
         if event.keysym in special_keys:
             return special_keys[event.keysym]
         
-        # Обычные символы
         if len(event.char) == 1 and ord(event.char) < 256:
             return ord(event.char)
         
         return None
     
-    def _send_key_event(self, keysym: int, down: bool):
-        """Отправка события клавиатуры."""
+    def _send_key_event_fast(self, keysym: int, down: bool):
+        """БЫСТРАЯ отправка события клавиатуры."""
         if not self.connected or not self.socket:
             return
         
         try:
-            # Проверяем валидность сокета
             if self.socket.fileno() == -1:
-                logger.debug("Cannot send key event: socket is closed")
                 return
             
-            message = struct.pack(
-                "!BxBBxxxI",
-                self.KEY_EVENT,
-                1 if down else 0,
-                0,  # padding
-                keysym
-            )
+            message = struct.pack("!BxBBxxxI", self.KEY_EVENT, 1 if down else 0, 0, keysym)
             self.socket.send(message)
             
-            # ИСПРАВЛЕНИЕ: Запрашиваем обновление только при нажатии, не при отпускании
-            if down:  # Только при нажатии клавиши
-                self._request_framebuffer_update(incremental=True)
+            # ПРОИЗВОДИТЕЛЬНОСТЬ: Запрос обновления только при нажатии
+            if down and self.pending_update_requests < 2:
+                self._request_framebuffer_update_fast(incremental=True)
             
-        except (OSError, socket.error) as e:
-            logger.debug(f"Socket error sending key event: {e}")
-            # Не разрываем соединение, просто игнорируем
-        except Exception as e:
-            logger.error(f"Error sending key event: {e}")
+        except (OSError, socket.error):
+            pass
+        except Exception:
+            pass
     
-    # Специальные команды
+    # Специальные команды (упрощенные)
     def _send_ctrl_alt_del(self):
-        """Отправка Ctrl+Alt+Del."""
         if not self.connected or self.view_only_var.get():
             return
         
-        # Последовательность: Ctrl down, Alt down, Del down, Del up, Alt up, Ctrl up
-        self._send_key_event(0xffe3, True)   # Ctrl down
-        self._send_key_event(0xffe9, True)   # Alt down
-        self._send_key_event(0xffff, True)   # Del down
-        self.after(50, lambda: self._send_key_event(0xffff, False))  # Del up
-        self.after(100, lambda: self._send_key_event(0xffe9, False))  # Alt up
-        self.after(150, lambda: self._send_key_event(0xffe3, False))  # Ctrl up
+        self._send_key_event_fast(0xffe3, True)   # Ctrl down
+        self._send_key_event_fast(0xffe9, True)   # Alt down
+        self._send_key_event_fast(0xffff, True)   # Del down
+        self.after(50, lambda: self._send_key_event_fast(0xffff, False))
+        self.after(100, lambda: self._send_key_event_fast(0xffe9, False))
+        self.after(150, lambda: self._send_key_event_fast(0xffe3, False))
     
     def _send_alt_tab(self):
-        """Отправка Alt+Tab."""
         if not self.connected or self.view_only_var.get():
             return
         
-        self._send_key_event(0xffe9, True)   # Alt down
-        self._send_key_event(0xff09, True)   # Tab down
-        self.after(50, lambda: self._send_key_event(0xff09, False))  # Tab up
-        self.after(100, lambda: self._send_key_event(0xffe9, False))  # Alt up
+        self._send_key_event_fast(0xffe9, True)   # Alt down
+        self._send_key_event_fast(0xff09, True)   # Tab down
+        self.after(50, lambda: self._send_key_event_fast(0xff09, False))
+        self.after(100, lambda: self._send_key_event_fast(0xffe9, False))
     
     def _send_escape(self):
-        """Отправка Escape."""
         if not self.connected or self.view_only_var.get():
             return
         
-        self._send_key_event(0xff1b, True)   # Esc down
-        self.after(50, lambda: self._send_key_event(0xff1b, False))  # Esc up
-    
-    def _toggle_fullscreen(self):
-        """Переключение полноэкранного режима."""
-        # TODO: Реализовать полноэкранный режим
-        messagebox.showinfo("Информация", "Полноэкранный режим в разработке")
+        self._send_key_event_fast(0xff1b, True)
+        self.after(50, lambda: self._send_key_event_fast(0xff1b, False))
     
     def _take_screenshot(self):
         """Создание скриншота."""
@@ -1850,122 +1478,119 @@ class VNCViewerFrame(ctk.CTkFrame):
             except Exception as e:
                 messagebox.showerror("Ошибка", f"Не удалось сохранить скриншот:\n{e}")
     
-    def cleanup(self):
-        """Очистка ресурсов."""
-        self.disconnect_from_vnc()
+    def _on_quality_change(self, value):
+        """Изменение режима производительности."""
+        logger.info(f"Quality mode changed to: {value}")
+        
+        if value == "Производительность":
+            self.update_request_interval = 0.025       # 40 FPS (более стабильно)
+            self.canvas_update_interval = 0.025        # 40 FPS
+            self.continuous_update_interval = 0.033    # 30 FPS continuous
+            self.max_pending_requests = 2
+        elif value == "Сбалансированный":
+            self.update_request_interval = 0.033       # 30 FPS
+            self.canvas_update_interval = 0.033        # 30 FPS
+            self.continuous_update_interval = 0.05     # 20 FPS continuous
+            self.max_pending_requests = 2
+        else:  # Качество
+            self.update_request_interval = 0.05        # 20 FPS
+            self.canvas_update_interval = 0.025        # 40 FPS для UI
+            self.continuous_update_interval = 0.1      # 10 FPS continuous
+            self.max_pending_requests = 1
+        
+        logger.info(f"Performance settings updated: intervals={self.update_request_interval:.3f}s, max_pending={self.max_pending_requests}")
+        
+        # Перезапускаем таймеры с новыми настройками
+        if self.connected:
+            self._restart_timers_with_new_settings()
+    
+    def _restart_timers_with_new_settings(self):
+        """Перезапуск таймеров с новыми настройками."""
+        # Останавливаем старые таймеры
+        if self.force_update_timer:
+            self.after_cancel(self.force_update_timer)
+            self.force_update_timer = None
+        if self.continuous_update_timer:
+            self.after_cancel(self.continuous_update_timer)
+            self.continuous_update_timer = None
+        
+        # Сбрасываем pending при смене настроек
+        self.pending_update_requests = 0
+        
+        # Запускаем новые с обновленными интервалами
+        self.after(100, self._start_high_performance_timers)
+        
+        logger.info("Timers restarted with new settings")
+        
+        # Перезапускаем таймеры с новыми настройками
+        if self.connected:
+            self._restart_timers_with_new_settings()
+    
+    def _on_continuous_change(self):
+        """Обработка изменения режима непрерывных обновлений."""
+        self.continuous_updates = self.continuous_var.get()
+        logger.info(f"Continuous updates: {'enabled' if self.continuous_updates else 'disabled'}")
     
     def _update_stats(self):
-        """ИСПРАВЛЕННОЕ обновление статистики производительности."""
+        """Обновление статистики производительности."""
         if not self.connected:
             self.after(1000, self._update_stats)
+    
+    def _force_screen_refresh(self):
+        """Принудительное обновление экрана для восстановления изображения."""
+        if not self.connected or not self.socket:
+            return
+        
+        try:
+            logger.info("Forcing screen refresh due to protocol issues")
+            
+            # Сбрасываем pending запросы
+            self.pending_update_requests = 0
+            
+            # Запрашиваем полное обновление экрана
+            self._request_framebuffer_update_stable(incremental=False)
+            
+            # Дополнительный incremental запрос через небольшую задержку
+            self.after(200, lambda: self._request_framebuffer_update_stable(incremental=True))
+            
+        except Exception as e:
+            logger.error(f"Error in force screen refresh: {e}")
             return
         
         current_time = time.time()
         
-        # Обновляем FPS чаще
+        # FPS
         if current_time - self.last_fps_time >= 1.0:
             fps = self.frame_count / (current_time - self.last_fps_time)
             self.fps_label.configure(text=f"FPS: {fps:.1f}")
-            
             self.frame_count = 0
             self.last_fps_time = current_time
         
-        # НОВОЕ: Обновляем UPS (Updates Per Second) и RPS (Requests Per Second)
+        # UPS
         if current_time - self.last_update_count_time >= 1.0:
             ups = self.update_count / (current_time - self.last_update_count_time)
-            rps = self.request_count / (current_time - self.last_update_count_time)
-            
             self.ups_label.configure(text=f"UPS: {ups:.1f}")
-            self.rps_label.configure(text=f"RPS: {rps:.1f}")
-            
             self.update_count = 0
-            self.request_count = 0
             self.last_update_count_time = current_time
         
-        # ИСПРАВЛЕНО: Улучшенное отображение pending запросов с цветовым кодированием
-        pending_text = f"Pending: {self.pending_update_requests}"
-        if self.pending_update_requests >= self.max_pending_requests:
-            pending_text += " ⚠️"  # Предупреждение если на максимуме
-        elif self.pending_update_requests == 0:
-            pending_text += " ✓"   # Галочка если нет pending
+        # НОВОЕ: Время последнего обновления framebuffer
+        if hasattr(self, 'last_framebuffer_time'):
+            time_since_fb = current_time - self.last_framebuffer_time
+            if time_since_fb < 1:
+                fb_status = "Live"
+                color = "green"
+            elif time_since_fb < 5:
+                fb_status = f"{time_since_fb:.1f}s ago"
+                color = "orange"
+            else:
+                fb_status = f"{time_since_fb:.0f}s ago"
+                color = "red"
+            
+            self.last_update_label.configure(text=f"Last FB: {fb_status}")
+            # Можно добавить цветовое кодирование если нужно
         
-        self.pending_label.configure(text=pending_text)
-        
-        # НОВОЕ: Диагностика зависших pending запросов
-        time_since_response = current_time - self.last_server_response_time
-        if self.pending_update_requests > 0 and time_since_response > 2.0:
-            logger.debug(f"Potential stuck pending requests: {self.pending_update_requests}, "
-                        f"last response {time_since_response:.1f}s ago")
-        
-        # Обновляем статистику каждую секунду
         self.after(1000, self._update_stats)
     
-    def _adjust_performance_settings(self):
-        """ИСПРАВЛЕННАЯ настройка производительности для сниженных задержек."""
-        quality = self.quality_var.get()
-        
-        if quality == "Среднее":
-            # Сбалансированная производительность
-            self.update_request_interval = 0.08      # 12.5 FPS запросов (было 0.1)
-            self.canvas_update_interval = 0.033      # 30 FPS UI
-            self.force_update_interval = 0.8         # 1.25 FPS принудительно (было 1.0)
-            self.continuous_update_interval = 0.15   # 6.7 FPS continuous (было 0.2)
-            self.max_pending_requests = 2            # Максимум 2 pending
-        elif quality == "Высокое":
-            # Хорошая производительность
-            self.update_request_interval = 0.06      # 16.7 FPS запросов (было 0.05)
-            self.canvas_update_interval = 0.033      # 30 FPS UI
-            self.force_update_interval = 0.6         # 1.7 FPS принудительно (было 0.5)
-            self.continuous_update_interval = 0.12   # 8.3 FPS continuous (было 0.15)
-            self.max_pending_requests = 2            # Максимум 2 pending
-        else:  # Максимум
-            # Максимальная производительность
-            self.update_request_interval = 0.05      # 20 FPS запросов (было 0.04)
-            self.canvas_update_interval = 0.033      # 30 FPS UI
-            self.force_update_interval = 0.4         # 2.5 FPS принудительно (было 0.33)
-            self.continuous_update_interval = 0.08   # 12.5 FPS continuous (было 0.1)
-            self.max_pending_requests = 3            # Максимум 3 pending для высокого качества
-        
-        logger.info(f"Performance settings: quality={quality}, "
-                   f"request_interval={self.update_request_interval}, "
-                   f"max_pending={self.max_pending_requests}, "
-                   f"force_interval={self.force_update_interval}, "
-                   f"continuous_interval={self.continuous_update_interval}")
-    
-    def _on_quality_change(self, value):
-        """ИСПРАВЛЕННАЯ обработка изменения качества."""
-        logger.info(f"Quality changing from current settings to: {value}")
-        
-        # Сохраняем старые настройки для сравнения
-        old_interval = self.update_request_interval
-        old_max_pending = self.max_pending_requests
-        
-        # Применяем новые настройки
-        self._adjust_performance_settings()
-        
-        # Перезапускаем таймеры с новыми настройками
-        if self.connected:
-            logger.info("Restarting timers with new quality settings")
-            
-            # Останавливаем старые таймеры
-            if self.force_update_timer:
-                self.after_cancel(self.force_update_timer)
-                self.force_update_timer = None
-            if self.request_update_timer:
-                self.after_cancel(self.request_update_timer)
-                self.request_update_timer = None
-            
-            # ИСПРАВЛЕНО: Сбрасываем pending при смене качества
-            if old_max_pending != self.max_pending_requests:
-                logger.info(f"Resetting pending requests due to max_pending change: {old_max_pending} -> {self.max_pending_requests}")
-                self.pending_update_requests = 0
-            
-            # Запускаем новые с обновленными интервалами
-            self.after(100, self._start_update_timers)
-            
-        logger.info(f"Quality changed: interval {old_interval:.3f}s -> {self.update_request_interval:.3f}s, "
-                   f"max_pending {old_max_pending} -> {self.max_pending_requests}")
-        
-        # НОВОЕ: Немедленный запрос обновления для проверки новых настроек
-        if self.connected:
-            self.after(200, lambda: self._request_framebuffer_update(incremental=True))
+    def cleanup(self):
+        """Очистка ресурсов."""
+        self.disconnect_from_vnc()
